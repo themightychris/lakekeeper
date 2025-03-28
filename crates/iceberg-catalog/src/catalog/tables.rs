@@ -1784,8 +1784,13 @@ pub(crate) fn create_table_request_into_table_metadata(
 
 #[cfg(test)]
 pub(crate) mod test {
-    use std::{collections::HashMap, str::FromStr};
+    use std::{
+        collections::HashMap,
+        str::FromStr,
+        sync::{Arc, Barrier},
+    };
 
+    use chrono::Utc;
     use http::StatusCode;
     use iceberg::{
         spec::{
@@ -1802,7 +1807,10 @@ pub(crate) mod test {
         configs::Location,
     };
     use itertools::Itertools;
+    use rand::{Rng, RngCore};
     use sqlx::PgPool;
+    use tokio::runtime::Handle;
+    use tracing_test::traced_test;
     use uuid::Uuid;
 
     use crate::{
@@ -1817,7 +1825,11 @@ pub(crate) mod test {
             management::v1::warehouse::TabularDeleteProfile,
             ApiContext,
         },
-        catalog::{tables::validate_table_properties, test::impl_pagination_tests, CatalogServer},
+        catalog::{
+            tables::{commit_tables_internal, validate_table_properties},
+            test::impl_pagination_tests,
+            CatalogServer,
+        },
         implementations::postgres::{PostgresCatalog, SecretsState},
         request_metadata::RequestMetadata,
         service::{
@@ -1898,7 +1910,10 @@ pub(crate) mod test {
             partition_spec: Some(UnboundPartitionSpec::builder().build()),
             write_order: None,
             stage_create: Some(false),
-            properties: None,
+            properties: Some(HashMap::from_iter([(
+                PROPERTY_METADATA_PREVIOUS_VERSIONS_MAX.to_string(),
+                "20000".to_string(),
+            )])),
         }
     }
 
@@ -2178,6 +2193,242 @@ pub(crate) mod test {
         .await
         .unwrap();
         assert_table_metadata_are_equal(&table_metadata.metadata, &tab.metadata);
+    }
+
+    #[sqlx::test]
+    #[tracing_test::traced_test]
+    async fn try_break_add_snapshot(pool: PgPool) {
+        let (ctx, ns, ns_params, table) = commit_test_setup(pool).await;
+        let last_updated = Utc::now().timestamp_millis();
+        let last_seq = table.metadata.last_sequence_number();
+        let builder = table.metadata.into_builder(table.metadata_location);
+        let mut snap_id = [0u8; 8];
+        rand::rng().fill_bytes(&mut snap_id);
+
+        let snapshot = Snapshot::builder()
+            .with_snapshot_id(i64::from_be_bytes(snap_id))
+            .with_timestamp_ms(last_updated)
+            .with_sequence_number(0)
+            .with_schema_id(0)
+            .with_manifest_list("/snap-1.avro")
+            .with_summary(Summary {
+                operation: Operation::Append,
+                additional_properties: HashMap::from_iter(vec![
+                    (
+                        "spark.app.id".to_string(),
+                        "local-1662532784305".to_string(),
+                    ),
+                    ("added-data-files".to_string(), "4".to_string()),
+                    ("added-records".to_string(), "4".to_string()),
+                    ("added-files-size".to_string(), "6001".to_string()),
+                ]),
+            })
+            .build();
+
+        rand::rng().fill_bytes(&mut snap_id);
+        let snapshot2 = Snapshot::builder()
+            .with_snapshot_id(i64::from_be_bytes(snap_id))
+            .with_timestamp_ms(last_updated - 1)
+            .with_sequence_number(-1)
+            .with_schema_id(0)
+            .with_manifest_list("/snap-1.avro")
+            .with_summary(Summary {
+                operation: Operation::Append,
+                additional_properties: HashMap::from_iter(vec![
+                    (
+                        "spark.app.id".to_string(),
+                        "local-1662532784305".to_string(),
+                    ),
+                    ("added-data-files".to_string(), "4".to_string()),
+                    ("added-records".to_string(), "4".to_string()),
+                    ("added-files-size".to_string(), "6001".to_string()),
+                ]),
+            })
+            .build();
+
+        rand::rng().fill_bytes(&mut snap_id);
+        let snapshot3 = Snapshot::builder()
+            .with_snapshot_id(i64::from_be_bytes(snap_id))
+            .with_timestamp_ms(last_updated + 1)
+            .with_sequence_number(1)
+            .with_schema_id(0)
+            .with_manifest_list("/snap-1.avro")
+            .with_summary(Summary {
+                operation: Operation::Append,
+                additional_properties: HashMap::from_iter(vec![
+                    (
+                        "spark.app.id".to_string(),
+                        "local-1662532784305".to_string(),
+                    ),
+                    ("added-data-files".to_string(), "4".to_string()),
+                    ("added-records".to_string(), "4".to_string()),
+                    ("added-files-size".to_string(), "6001".to_string()),
+                ]),
+            })
+            .build();
+
+        let builder = builder
+            .add_snapshot(snapshot.clone())
+            .unwrap()
+            .add_snapshot(snapshot3.clone())
+            .unwrap()
+            .add_snapshot(snapshot2.clone())
+            .unwrap()
+            .build()
+            .unwrap();
+        let updates = builder.changes;
+        commit_tables_internal(
+            ns_params.prefix.clone(),
+            super::CommitTransactionRequest {
+                table_changes: vec![CommitTableRequest {
+                    identifier: Some(TableIdent {
+                        namespace: ns.namespace.clone(),
+                        name: "tab-1".to_string(),
+                    }),
+                    requirements: vec![],
+                    updates,
+                }],
+            },
+            ctx.clone(),
+            RequestMetadata::new_unauthenticated(),
+        )
+        .await
+        .unwrap();
+        let table = CatalogServer::load_table(
+            TableParameters {
+                prefix: ns_params.prefix.clone(),
+                table: TableIdent {
+                    namespace: ns_params.namespace.clone(),
+                    name: "tab-1".to_string(),
+                },
+            },
+            DataAccess::none(),
+            ctx.clone(),
+            RequestMetadata::new_unauthenticated(),
+        )
+        .await
+        .inspect(|_| tracing::info!("Thread loaded"))
+        .inspect_err(|e| tracing::error!("Thread: Error loading table: {:?}", e))
+        .unwrap();
+
+        assert_eq!(table.metadata.last_sequence_number(), 1);
+    }
+
+    #[sqlx::test]
+    #[tracing_test::traced_test]
+    async fn test_concurrent_add_snapshot(pool: PgPool) {
+        let (ctx, ns, ns_params, table) = commit_test_setup(pool).await;
+
+        // Shared barrier to synchronize threads
+        let thread_count = 24;
+        let barrier = Arc::new(Barrier::new(thread_count));
+        let handle = Handle::current();
+        let threads = (0..thread_count)
+            .map(|i| {
+                let barrier_clone = barrier.clone();
+                let handle_clone = handle.clone();
+                let ctx_clone = ctx.clone();
+                let ns_params_clone = ns_params.clone();
+                let ns_clone = ns.clone();
+                tracing::info!("Starting thread {}", i);
+                std::thread::spawn(move || {
+                    tracing::info!("Thread {} starting", i);
+                    handle_clone.block_on(async {
+                        loop {
+                            let jitter = { rand::rng().random_range(0..100) };
+
+                            tokio::time::sleep(tokio::time::Duration::from_millis(jitter)).await;
+                            let table = CatalogServer::load_table(
+                                TableParameters {
+                                    prefix: ns_params_clone.prefix.clone(),
+                                    table: TableIdent {
+                                        namespace: ns_clone.namespace.clone(),
+                                        name: "tab-1".to_string(),
+                                    },
+                                },
+                                DataAccess::none(),
+                                ctx_clone.clone(),
+                                RequestMetadata::new_unauthenticated(),
+                            )
+                            .await
+                            .inspect(|_| tracing::info!("Thread {i} loaded"))
+                            .inspect_err(|e| {
+                                tracing::error!("Thread: {i} Error loading table: {:?}", e)
+                            })
+                            .unwrap();
+
+                            let last_updated = Utc::now().timestamp_millis();
+                            let last_seq = table.metadata.last_sequence_number();
+                            let builder = table.metadata.into_builder(table.metadata_location);
+                            let mut snap_id = [0u8; 8];
+                            rand::rng().fill_bytes(&mut snap_id);
+
+                            let snapshot = Snapshot::builder()
+                                .with_snapshot_id(i64::from_be_bytes(snap_id))
+                                .with_timestamp_ms(last_updated)
+                                .with_sequence_number(last_seq + 1)
+                                .with_schema_id(0)
+                                .with_manifest_list("/snap-1.avro")
+                                .with_summary(Summary {
+                                    operation: Operation::Append,
+                                    additional_properties: HashMap::from_iter(vec![
+                                        (
+                                            "spark.app.id".to_string(),
+                                            "local-1662532784305".to_string(),
+                                        ),
+                                        ("added-data-files".to_string(), "4".to_string()),
+                                        ("added-records".to_string(), "4".to_string()),
+                                        ("added-files-size".to_string(), "6001".to_string()),
+                                    ]),
+                                })
+                                .build();
+
+                            let builder = builder
+                                .add_snapshot(snapshot.clone())
+                                .unwrap()
+                                .build()
+                                .unwrap();
+                            let updates = builder.changes;
+
+                            let res = super::commit_tables_internal(
+                                ns_params_clone.prefix.clone(),
+                                super::CommitTransactionRequest {
+                                    table_changes: vec![CommitTableRequest {
+                                        identifier: Some(TableIdent {
+                                            namespace: ns_clone.namespace.clone(),
+                                            name: "tab-1".to_string(),
+                                        }),
+                                        requirements: vec![],
+                                        updates,
+                                    }],
+                                },
+                                ctx_clone.clone(),
+                                RequestMetadata::new_unauthenticated(),
+                            )
+                            .await
+                            .inspect_err(|e| {
+                                tracing::error!("Thread {i}: Error committing table: {:?}", e)
+                            });
+                            match res {
+                                Ok(_) => {}
+                                Err(e) => {
+                                    if e.error.message.starts_with("Snapshot already exists for:") {
+                                        tracing::info!("Thread {i}: conflicted out, continuing");
+                                        continue;
+                                    }
+                                    if e.error.code == StatusCode::CONFLICT {
+                                        tracing::info!("Thread {i}: conflicted out, continuing");
+                                        continue;
+                                    }
+                                    tracing::error!("Thread {i}: Error committing table: {:?}", e);
+                                }
+                            }
+                        }
+                    })
+                })
+            })
+            .collect_vec();
+        tokio::time::sleep(tokio::time::Duration::from_secs(600)).await;
     }
 
     #[sqlx::test]
