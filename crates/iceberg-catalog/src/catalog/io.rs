@@ -1,9 +1,3 @@
-use super::compression_codec::CompressionCodec;
-use crate::{
-    api::{ErrorModel, Result},
-    retry::retry_fn,
-    service::storage::az::reduce_scheme_string as reduce_azure_scheme,
-};
 use futures::{stream::BoxStream, StreamExt, TryStreamExt};
 use hdfs_native_object_store::HdfsObjectStore;
 use iceberg::{io::FileIO as IcebergFileIO, spec::TableMetadata};
@@ -11,6 +5,13 @@ use iceberg_ext::{catalog::rest::IcebergErrorResponse, configs::Location};
 use object_store::{ObjectStore, PutPayload};
 use serde::Serialize;
 use tokio::io::AsyncWrite;
+
+use super::compression_codec::CompressionCodec;
+use crate::{
+    api::{ErrorModel, Result},
+    retry::retry_fn,
+    service::storage::az::reduce_scheme_string as reduce_azure_scheme,
+};
 
 pub(crate) enum FileIO {
     FileIO(IcebergFileIO),
@@ -364,13 +365,14 @@ impl From<IoError> for IcebergErrorResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::service::storage::hdfs::HdfsProfile;
-    use crate::service::storage::{hdfs, StorageCredential, StorageProfile};
+    use std::collections::HashSet;
+
     use iceberg_ext::configs::ParseFromStr;
     use needs_env_var::needs_env_var;
     use serial_test::serial;
-    use std::collections::HashSet;
+
+    use super::*;
+    use crate::service::storage::{hdfs, hdfs::HdfsProfile, StorageCredential, StorageProfile};
 
     #[allow(dead_code)]
     async fn test_remove_all(cred: StorageCredential, profile: StorageProfile) {

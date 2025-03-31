@@ -22,14 +22,18 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::{secrets::SecretInStorage, NamespaceIdentUuid, TableIdentUuid};
-use crate::catalog::io::FileIO;
-use crate::service::storage::hdfs::{HdfsCredential, HdfsProfile};
 use crate::{
     api::{iceberg::v1::DataAccess, CatalogConfig},
-    catalog::{compression_codec::CompressionCodec, io::list_location},
+    catalog::{
+        compression_codec::CompressionCodec,
+        io::{list_location, FileIO},
+    },
     request_metadata::RequestMetadata,
     retry::retry_fn,
-    service::tabular_idents::TabularIdentUuid,
+    service::{
+        storage::hdfs::{HdfsCredential, HdfsProfile},
+        tabular_idents::TabularIdentUuid,
+    },
     WarehouseIdent,
 };
 

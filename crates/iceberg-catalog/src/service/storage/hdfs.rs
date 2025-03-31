@@ -4,12 +4,15 @@
 //     sync::{Arc, OnceLock},
 // };
 
-use crate::api::iceberg::v1::DataAccess;
-use crate::service::storage::error::TableConfigError;
-use crate::service::storage::{StoragePermissions, StorageType, TableConfig, ValidationError};
-use iceberg_ext::configs::table::TableProperties;
-use iceberg_ext::configs::{Location, ParseFromStr};
+use iceberg_ext::configs::{table::TableProperties, Location, ParseFromStr};
 use serde::{Deserialize, Serialize};
+
+use crate::{
+    api::iceberg::v1::DataAccess,
+    service::storage::{
+        error::TableConfigError, StoragePermissions, StorageType, TableConfig, ValidationError,
+    },
+};
 
 #[derive(Debug, Eq, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "kebab-case")]
@@ -52,11 +55,13 @@ pub struct HdfsCredential {}
 
 #[cfg(test)]
 pub(crate) mod test {
-    use super::*;
-    use crate::service::storage::{StorageCredential, StorageProfile};
+    use std::collections::HashSet;
+
     use hdfs_native::minidfs::MiniDfs;
     use serial_test::serial;
-    use std::collections::HashSet;
+
+    use super::*;
+    use crate::service::storage::{StorageCredential, StorageProfile};
 
     #[sqlx::test]
     #[serial]
