@@ -24,9 +24,9 @@ pub struct HdfsProfile {
 impl HdfsProfile {
     pub fn generate_table_config(
         &self,
-        data_access: &DataAccess,
-        table_location: &Location,
-        storage_permissions: StoragePermissions,
+        _data_access: &DataAccess,
+        _table_location: &Location,
+        _storage_permissions: StoragePermissions,
     ) -> Result<TableConfig, TableConfigError> {
         Ok(TableConfig {
             creds: TableProperties::default(),
@@ -72,7 +72,7 @@ pub(crate) mod test {
     }
 
     pub(crate) fn test_profile() -> (MiniDfs, HdfsProfile, StorageCredential) {
-        let minidfs = hdfs_native::minidfs::MiniDfs::with_features(&HashSet::default());
+        let minidfs = MiniDfs::with_features(&HashSet::default());
 
         let hdfs_profile = HdfsProfile {
             url: minidfs.url.clone(),
