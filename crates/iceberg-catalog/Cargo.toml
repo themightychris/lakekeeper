@@ -26,7 +26,7 @@ sqlx = ["dep:sqlx"]
 s3-signer = ["dep:aws-sigv4", "dep:aws-credential-types"]
 router = ["dep:tower-http"]
 nats = ["dep:async-nats"]
-kafka = ["dep:rdkafka"]
+kafka = ["dep:rdkafka", "dep:openssl-src"]
 vendored-protoc = ["openfga-rs/vendored-protoc"]
 
 [dependencies]
@@ -123,4 +123,4 @@ tracing-test = "0.2.5"
 [build-dependencies]
 openssl-src = { version = "300.4.2", features = [
     "force-engine",
-], default-features = false }
+], default-features = false, optional = true }

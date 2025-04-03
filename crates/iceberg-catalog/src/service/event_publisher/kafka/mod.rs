@@ -4,6 +4,7 @@ use std::{collections::HashMap, time::Duration};
 
 use async_trait::async_trait;
 use cloudevents::Event;
+use rdkafka::producer::future_producer::Delivery;
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use serde::{Deserialize, Serialize};
 use veil::Redact;
@@ -63,12 +64,14 @@ impl CloudEventBackend for KafkaBackend {
             .await;
 
         match delivery_status {
-            Ok((partition, offset)) => {
+            Ok(Delivery {
+                partition,
+                offset,
+                timestamp,
+            }) => {
                 tracing::debug!(
-                    "CloudEvents event sent via kafka to topic: {}, partition: {}, offset: {}",
+                    "CloudEvents event sent via kafka to topic: {}, partition: {partition}, offset: {offset}, timestamp: {timestamp:?}",
                     &self.topic,
-                    partition,
-                    offset,
                 );
                 Ok(())
             }
