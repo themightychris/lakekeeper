@@ -4,8 +4,7 @@ use std::{collections::HashMap, time::Duration};
 
 use async_trait::async_trait;
 use cloudevents::Event;
-use rdkafka::producer::future_producer::Delivery;
-use rdkafka::producer::{FutureProducer, FutureRecord};
+use rdkafka::producer::{future_producer::Delivery, FutureProducer, FutureRecord};
 use serde::{Deserialize, Serialize};
 use veil::Redact;
 
