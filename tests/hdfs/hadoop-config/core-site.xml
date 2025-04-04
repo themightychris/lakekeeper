@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
+<configuration>
+    <property>
+        <name>fs.defaultFS</name>
+        <value>hdfs://namenode.example.com:8020</value>
+    </property>
+
+    <!-- Security properties -->
+    <property>
+        <name>hadoop.security.authentication</name>
+        <value>kerberos</value>
+    </property>
+    <property>
+        <name>hadoop.security.authorization</name>
+        <value>true</value>
+    </property>
+    <property>
+        <name>hadoop.rpc.protection</name>
+        <value>privacy</value>
+    </property>
+
+    <!-- Specify the kerberos principal to be used -->
+    <property>
+        <name>hadoop.security.auth_to_local</name>
+        <value>
+            RULE:[2:$1/$2@$0]([ndj]n/.*@EXAMPLE.COM)s/.*/hdfs/
+            RULE:[2:$1/$2@$0]([rn]m/.*@EXAMPLE.COM)s/.*/yarn/
+            DEFAULT
+        </value>
+    </property>
+</configuration>

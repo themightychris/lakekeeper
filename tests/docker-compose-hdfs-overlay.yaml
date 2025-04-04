@@ -1,0 +1,209 @@
+services:
+  server:
+    environment:
+      - KRB5CCNAME=/tickets/krb5cc_0
+      - KRB5_CONFIG=/etc/krb5.conf
+      - HADOOP_CONF_DIR=/etc/hadoop
+    volumes:
+      - kerberos-tickets:/tickets:ro
+      - ./hdfs/krb5.conf:/etc/krb5.conf:ro
+      - ./hdfs/hadoop-config/core-site.xml:/etc/hadoop/core-site.xml:ro
+      - ./hdfs/hadoop-config/hdfs-site.xml:/etc/hadoop/hdfs-site.xml:ro
+    depends_on:
+      - kerberos-sidecar
+  # Kerberos KDC (Key Distribution Center)
+  keycloak:
+    ports:
+      - "8080:8080"
+  kdc:
+    image: sequenceiq/kerberos:latest
+    hostname: kdc.example.com
+    entrypoint: [ "/bin/bash", "-c" ]
+    command: |
+      "
+      # Stop services to reconfigure
+      /etc/rc.d/init.d/krb5kdc stop
+      /etc/rc.d/init.d/kadmin stop
+
+      # Delete old database
+      kdb5_util destroy -f -r NODE.DC1.CONSUL
+
+      # Create new configuration with correct realm
+      cat > /etc/krb5.conf << EOF
+      [libdefaults]
+        default_realm = EXAMPLE.COM
+        dns_lookup_realm = false
+        dns_lookup_kdc = false
+
+      [realms]
+        EXAMPLE.COM = {
+          kdc = kdc.example.com
+          admin_server = kdc.example.com
+        }
+      EOF
+
+      # Update KDC config
+      sed -i 's/NODE.DC1.CONSUL/EXAMPLE.COM/g' /var/kerberos/krb5kdc/kdc.conf
+
+      # Initialize new database
+      mkdir -p /var/log/kerberos
+      kdb5_util -P masterkey -r EXAMPLE.COM create -s
+
+      # Create principals
+      kadmin.local -q 'addprinc -pw admin admin/admin'
+      echo '*/admin@EXAMPLE.COM *' > /var/kerberos/krb5kdc/kadm5.acl
+      kadmin.local -q 'addprinc -pw apppassword app@EXAMPLE.COM'
+
+      # Create keytab
+      kadmin.local -q 'ktadd -k /keytabs/app.keytab app@EXAMPLE.COM'
+      chmod 644 /keytabs/*.keytab
+
+      # Create ready file explicitly
+      echo 'Keytab created' > /keytabs/ready
+      chmod 644 /keytabs/ready
+
+      # Start services
+      /etc/rc.d/init.d/krb5kdc start
+      /etc/rc.d/init.d/kadmin start
+
+      # Keep container running
+      tail -F /var/log/kerberos/krb5kdc.log
+      "
+    volumes:
+      - ./keytabs:/keytabs
+    networks:
+      iceberg_rest_tests:
+        aliases:
+          - kdc.example.com
+
+  # HDFS NameNode with Kerberos
+  namenode:
+    image: apache/hadoop:3
+    hostname: namenode.example.com
+    depends_on:
+      - kdc
+    environment:
+      HADOOP_CONF_DIR: /etc/hadoop
+      HADOOP_SECURITY_AUTHENTICATION: kerberos
+      HADOOP_SECURITY_AUTHORIZATION: "true"
+      HADOOP_NAMENODE_KERBEROS_PRINCIPAL: nn/_HOST@EXAMPLE.COM
+      HADOOP_NAMENODE_KEYTAB_FILE: /etc/hadoop/keytabs/nn.keytab
+    volumes:
+      - ./hdfs/hadoop-config:/etc/hadoop:ro
+      - ./hdfs/keytabs:/etc/hadoop/keytabs:ro
+      - namenode-data:/hadoop/dfs/name
+    command: ["hdfs", "namenode"]
+    networks:
+      iceberg_rest_tests:
+        aliases:
+          - namenode.example.com
+
+  # HDFS DataNode with Kerberos
+  datanode:
+    image: apache/hadoop:3
+    hostname: datanode.example.com
+    depends_on:
+      - namenode
+      - kdc
+    environment:
+      HADOOP_CONF_DIR: /etc/hadoop
+      HADOOP_SECURITY_AUTHENTICATION: kerberos
+      HADOOP_SECURITY_AUTHORIZATION: "true"
+      HADOOP_DATANODE_KERBEROS_PRINCIPAL: dn/_HOST@EXAMPLE.COM
+      HADOOP_DATANODE_KEYTAB_FILE: /etc/hadoop/keytabs/dn.keytab
+    volumes:
+      - ./hdfs/hadoop-config:/etc/hadoop:ro
+      - ./hdfs/keytabs:/etc/hadoop/keytabs:ro
+      - datanode-data:/hadoop/dfs/data
+    command: ["hdfs", "datanode"]
+    networks:
+      iceberg_rest_tests:
+        aliases:
+          - datanode.example.com
+
+  # Kerberos authentication sidecar
+  # Kerberos authentication sidecar
+  kerberos-sidecar:
+    image: ubuntu:22.04
+    depends_on:
+      - kdc
+    volumes:
+      - kerberos-tickets:/tickets
+      - ./keytabs:/keytabs:ro
+    environment:
+      - DEBIAN_FRONTEND=noninteractive
+    command: >
+      bash -c '
+        # Create krb5.conf first
+        echo "[libdefaults]" > /etc/krb5.conf
+        echo "  default_realm = EXAMPLE.COM" >> /etc/krb5.conf
+        echo "  dns_lookup_realm = false" >> /etc/krb5.conf
+        echo "  dns_lookup_kdc = false" >> /etc/krb5.conf
+        echo "" >> /etc/krb5.conf
+        echo "[realms]" >> /etc/krb5.conf
+        echo "  EXAMPLE.COM = {" >> /etc/krb5.conf
+        echo "    kdc = kdc.example.com" >> /etc/krb5.conf
+        echo "    admin_server = kdc.example.com" >> /etc/krb5.conf
+        echo "  }" >> /etc/krb5.conf
+
+        # Install Kerberos client
+        apt-get update && apt-get install -y krb5-user
+
+        # Wait for ready signal
+        while [ ! -f /keytabs/ready ]; do
+          echo "Waiting for keytab..."
+          sleep 5
+        done
+
+        export KRB5CCNAME=/tickets/krb5cc_0
+        kinit -kt /keytabs/app.keytab app
+
+        if [ $? -eq 0 ]; then
+          echo "SUCCESS: Authentication worked!"
+          klist
+          while true; do
+            sleep 3600
+            kinit -kt /keytabs/app.keytab app
+          done
+        else
+          echo "FAILED: Authentication failed"
+          exit 1
+        fi
+      '
+    networks:
+      iceberg_rest_tests:
+        aliases:
+          - kerberos-sidecar.example.com
+
+#  # Add this to your docker-compose file
+#  keytab-init:
+#    image: sequenceiq/kerberos:latest
+#    depends_on:
+#      - kdc
+#    volumes:
+#      - ./hdfs/keytabs:/keytabs
+#    command: |
+#      bash -c "
+#        sleep 30 # Wait for KDC to be ready
+#        kadmin -p admin/admin -w admin -q 'addprinc -randkey nn/namenode.example.com@EXAMPLE.COM'
+#        kadmin -p admin/admin -w admin -q 'addprinc -randkey dn/datanode.example.com@EXAMPLE.COM'
+#        kadmin -p admin/admin -w admin -q 'addprinc -randkey HTTP/namenode.example.com@EXAMPLE.COM'
+#        kadmin -p admin/admin -w admin -q 'addprinc -randkey HTTP/datanode.example.com@EXAMPLE.COM'
+#        kadmin -p admin/admin -w admin -q 'addprinc -randkey app@EXAMPLE.COM'
+#
+#        kadmin -p admin/admin -w admin -q 'ktadd -k /keytabs/nn.keytab nn/namenode.example.com@EXAMPLE.COM HTTP/namenode.example.com@EXAMPLE.COM'
+#        kadmin -p admin/admin -w admin -q 'ktadd -k /keytabs/dn.keytab dn/datanode.example.com@EXAMPLE.COM HTTP/datanode.example.com@EXAMPLE.COM'
+#        kadmin -p admin/admin -w admin -q 'ktadd -k /keytabs/app.keytab app@EXAMPLE.COM'
+#
+#        chmod 644 /keytabs/*.keytab
+#      "
+#    networks:
+#      - iceberg_rest_tests
+networks:
+  iceberg_rest_tests:
+    driver: bridge
+
+volumes:
+  namenode-data:
+  datanode-data:
+  kerberos-tickets:

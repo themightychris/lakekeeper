@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
+<configuration>
+    <!-- NameNode security config -->
+    <property>
+        <name>dfs.namenode.kerberos.principal</name>
+        <value>nn/_HOST@EXAMPLE.COM</value>
+    </property>
+    <property>
+        <name>dfs.namenode.keytab.file</name>
+        <value>/etc/hadoop/keytabs/nn.keytab</value>
+    </property>
+
+    <!-- DataNode security config -->
+    <property>
+        <name>dfs.datanode.kerberos.principal</name>
+        <value>dn/_HOST@EXAMPLE.COM</value>
+    </property>
+    <property>
+        <name>dfs.datanode.keytab.file</name>
+        <value>/etc/hadoop/keytabs/dn.keytab</value>
+    </property>
+
+    <!-- Web UI security config -->
+    <property>
+        <name>dfs.web.authentication.kerberos.principal</name>
+        <value>HTTP/_HOST@EXAMPLE.COM</value>
+    </property>
+
+    <!-- Block access token configuration -->
+    <property>
+        <name>dfs.block.access.token.enable</name>
+        <value>true</value>
+    </property>
+
+    <!-- General HDFS config -->
+    <property>
+        <name>dfs.replication</name>
+        <value>1</value>
+    </property>
+
+    <!-- Data transfer protection -->
+    <property>
+        <name>dfs.data.transfer.protection</name>
+        <value>privacy</value>
+    </property>
+</configuration>
