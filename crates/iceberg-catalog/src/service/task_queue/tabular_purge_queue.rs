@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::{
     api::{management::v1::TabularType, Result},
-    catalog::{io::remove_all, maybe_get_secret},
+    catalog::maybe_get_secret,
     service::{
         task_queue::{Task, TaskQueue},
         Catalog, SecretStore, Transaction,

@@ -18,7 +18,7 @@ use crate::{
 #[serde(rename_all = "kebab-case")]
 pub struct HdfsProfile {
     pub url: String,
-    pub base_location: String,
+    pub prefix: String,
 }
 
 impl HdfsProfile {
@@ -39,12 +39,12 @@ impl HdfsProfile {
     }
 
     pub fn base_location(&self) -> Result<Location, ValidationError> {
-        Location::parse_value(self.base_location.as_str()).map_err(|e| {
+        Location::parse_value(&format!("hdfs://{}", self.prefix.as_str())).map_err(|e| {
             ValidationError::InvalidLocation {
                 source: Some(Box::new(e)),
                 reason: "Failed to create location for storage profile.".to_string(),
                 storage_type: StorageType::Adls,
-                location: self.base_location.clone(),
+                location: self.prefix.clone(),
             }
         })
     }
@@ -76,7 +76,7 @@ pub(crate) mod test {
 
         let hdfs_profile = HdfsProfile {
             url: minidfs.url.clone(),
-            base_location: "hdfs:///user/hdfs".to_string(),
+            prefix: "hdfs:///user/hdfs".to_string(),
         };
 
         (
