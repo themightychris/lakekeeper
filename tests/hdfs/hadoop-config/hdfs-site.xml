@@ -4,7 +4,7 @@
     <!-- NameNode security config -->
     <property>
         <name>dfs.namenode.kerberos.principal</name>
-        <value>nn/_HOST@EXAMPLE.COM</value>
+        <value>nn@EXAMPLE.COM</value>
     </property>
     <property>
         <name>dfs.namenode.keytab.file</name>
@@ -14,7 +14,7 @@
     <!-- DataNode security config -->
     <property>
         <name>dfs.datanode.kerberos.principal</name>
-        <value>dn/_HOST@EXAMPLE.COM</value>
+        <value>dn@EXAMPLE.COM</value>
     </property>
     <property>
         <name>dfs.datanode.keytab.file</name>

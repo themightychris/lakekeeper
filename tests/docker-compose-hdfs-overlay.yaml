@@ -28,20 +28,6 @@ services:
       # Delete old database
       kdb5_util destroy -f -r NODE.DC1.CONSUL
 
-      # Create new configuration with correct realm
-      cat > /etc/krb5.conf << EOF
-      [libdefaults]
-        default_realm = EXAMPLE.COM
-        dns_lookup_realm = false
-        dns_lookup_kdc = false
-
-      [realms]
-        EXAMPLE.COM = {
-          kdc = kdc.example.com
-          admin_server = kdc.example.com
-        }
-      EOF
-
       # Update KDC config
       sed -i 's/NODE.DC1.CONSUL/EXAMPLE.COM/g' /var/kerberos/krb5kdc/kdc.conf
 
@@ -52,10 +38,15 @@ services:
       # Create principals
       kadmin.local -q 'addprinc -pw admin admin/admin'
       echo '*/admin@EXAMPLE.COM *' > /var/kerberos/krb5kdc/kadm5.acl
-      kadmin.local -q 'addprinc -pw apppassword app@EXAMPLE.COM'
-
-      # Create keytab
+      kadmin.local -q 'addprinc -pw password app@EXAMPLE.COM'
+      # Missing principal creations
+      kadmin.local -q 'addprinc -pw password nn@EXAMPLE.COM'
+      kadmin.local -q 'addprinc -pw password dn@EXAMPLE.COM'
+      
+      # Create keytabs
       kadmin.local -q 'ktadd -k /keytabs/app.keytab app@EXAMPLE.COM'
+      kadmin.local -q 'ktadd -k /keytabs/nn.keytab nn@EXAMPLE.COM'
+      kadmin.local -q 'ktadd -k /keytabs/dn.keytab dn@EXAMPLE.COM'
       chmod 644 /keytabs/*.keytab
 
       # Create ready file explicitly
@@ -71,6 +62,7 @@ services:
       "
     volumes:
       - ./keytabs:/keytabs
+      - ./hdfs/krb5.conf:/etc/krb5.conf:ro
     networks:
       iceberg_rest_tests:
         aliases:
@@ -84,13 +76,12 @@ services:
       - kdc
     environment:
       HADOOP_CONF_DIR: /etc/hadoop
-      HADOOP_SECURITY_AUTHENTICATION: kerberos
-      HADOOP_SECURITY_AUTHORIZATION: "true"
-      HADOOP_NAMENODE_KERBEROS_PRINCIPAL: nn/_HOST@EXAMPLE.COM
-      HADOOP_NAMENODE_KEYTAB_FILE: /etc/hadoop/keytabs/nn.keytab
+      KRB5_CONFIG: /etc/krb5.conf
+      HADOOP_OPTS: "-Djava.security.krb5.conf=/etc/krb5.conf"
     volumes:
       - ./hdfs/hadoop-config:/etc/hadoop:ro
-      - ./hdfs/keytabs:/etc/hadoop/keytabs:ro
+      - ./keytabs:/etc/hadoop/keytabs:ro
+      - ./hdfs/krb5.conf:/etc/krb5.conf:ro
       - namenode-data:/hadoop/dfs/name
     command: ["hdfs", "namenode"]
     networks:
@@ -113,7 +104,7 @@ services:
       HADOOP_DATANODE_KEYTAB_FILE: /etc/hadoop/keytabs/dn.keytab
     volumes:
       - ./hdfs/hadoop-config:/etc/hadoop:ro
-      - ./hdfs/keytabs:/etc/hadoop/keytabs:ro
+      - ./keytabs:/etc/hadoop/keytabs:ro
       - datanode-data:/hadoop/dfs/data
     command: ["hdfs", "datanode"]
     networks:
@@ -122,7 +113,6 @@ services:
           - datanode.example.com
 
   # Kerberos authentication sidecar
-  # Kerberos authentication sidecar
   kerberos-sidecar:
     image: ubuntu:22.04
     depends_on:
@@ -130,34 +120,36 @@ services:
     volumes:
       - kerberos-tickets:/tickets
       - ./keytabs:/keytabs:ro
+      # Mount krb5.conf to a different location initially
+      - ./hdfs/krb5.conf:/tmp/krb5.conf:ro
     environment:
       - DEBIAN_FRONTEND=noninteractive
     command: >
       bash -c '
-        # Create krb5.conf first
-        echo "[libdefaults]" > /etc/krb5.conf
-        echo "  default_realm = EXAMPLE.COM" >> /etc/krb5.conf
-        echo "  dns_lookup_realm = false" >> /etc/krb5.conf
-        echo "  dns_lookup_kdc = false" >> /etc/krb5.conf
-        echo "" >> /etc/krb5.conf
-        echo "[realms]" >> /etc/krb5.conf
-        echo "  EXAMPLE.COM = {" >> /etc/krb5.conf
-        echo "    kdc = kdc.example.com" >> /etc/krb5.conf
-        echo "    admin_server = kdc.example.com" >> /etc/krb5.conf
-        echo "  }" >> /etc/krb5.conf
-
+        echo "Using mounted krb5.conf:"
+        cat /etc/krb5.conf
         # Install Kerberos client
-        apt-get update && apt-get install -y krb5-user
-
+        apt-get update
+        apt-get install -y --no-install-recommends krb5-user
+        # Now copy our configuration over the installed one
+        cp /tmp/krb5.conf /etc/krb5.conf
         # Wait for ready signal
         while [ ! -f /keytabs/ready ]; do
           echo "Waiting for keytab..."
           sleep 5
         done
-
+        echo "running"
         export KRB5CCNAME=/tickets/krb5cc_0
-        kinit -kt /keytabs/app.keytab app
+        echo "Using ticket cache: $KRB5CCNAME"
 
+        klist -kte /keytabs/app.keytab
+        klist -kte /keytabs/nn.keytab
+        klist -kte /keytabs/dn.keytab
+      
+        kinit -V -kt /keytabs/app.keytab app@EXAMPLE.COM
+
+
+      
         if [ $? -eq 0 ]; then
           echo "SUCCESS: Authentication worked!"
           klist
@@ -167,6 +159,7 @@ services:
           done
         else
           echo "FAILED: Authentication failed"
+          klist
           exit 1
         fi
       '
@@ -174,6 +167,7 @@ services:
       iceberg_rest_tests:
         aliases:
           - kerberos-sidecar.example.com
+
   jupyter:
     image: quay.io/jupyter/pyspark-notebook:2024-10-14
     depends_on:
