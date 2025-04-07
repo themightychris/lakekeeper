@@ -174,31 +174,18 @@ services:
       iceberg_rest_tests:
         aliases:
           - kerberos-sidecar.example.com
-
-#  # Add this to your docker-compose file
-#  keytab-init:
-#    image: sequenceiq/kerberos:latest
-#    depends_on:
-#      - kdc
-#    volumes:
-#      - ./hdfs/keytabs:/keytabs
-#    command: |
-#      bash -c "
-#        sleep 30 # Wait for KDC to be ready
-#        kadmin -p admin/admin -w admin -q 'addprinc -randkey nn/namenode.example.com@EXAMPLE.COM'
-#        kadmin -p admin/admin -w admin -q 'addprinc -randkey dn/datanode.example.com@EXAMPLE.COM'
-#        kadmin -p admin/admin -w admin -q 'addprinc -randkey HTTP/namenode.example.com@EXAMPLE.COM'
-#        kadmin -p admin/admin -w admin -q 'addprinc -randkey HTTP/datanode.example.com@EXAMPLE.COM'
-#        kadmin -p admin/admin -w admin -q 'addprinc -randkey app@EXAMPLE.COM'
-#
-#        kadmin -p admin/admin -w admin -q 'ktadd -k /keytabs/nn.keytab nn/namenode.example.com@EXAMPLE.COM HTTP/namenode.example.com@EXAMPLE.COM'
-#        kadmin -p admin/admin -w admin -q 'ktadd -k /keytabs/dn.keytab dn/datanode.example.com@EXAMPLE.COM HTTP/datanode.example.com@EXAMPLE.COM'
-#        kadmin -p admin/admin -w admin -q 'ktadd -k /keytabs/app.keytab app@EXAMPLE.COM'
-#
-#        chmod 644 /keytabs/*.keytab
-#      "
-#    networks:
-#      - iceberg_rest_tests
+  jupyter:
+    image: quay.io/jupyter/pyspark-notebook:2024-10-14
+    depends_on:
+      server:
+        condition: service_healthy
+    command: start-notebook.sh --NotebookApp.token=''
+    volumes:
+      - ./notebooks:/home/jovyan/examples/
+    networks:
+      iceberg_rest_tests:
+    ports:
+      - "8888:8888"
 networks:
   iceberg_rest_tests:
     driver: bridge
