@@ -29,4 +29,13 @@
             DEFAULT
         </value>
     </property>
+    <!-- Required for secure DataNode -->
+    <property>
+        <name>hadoop.http.authentication.type</name>
+        <value>kerberos</value>
+    </property>
+    <property>
+        <name>hadoop.http.filter.initializers</name>
+        <value>org.apache.hadoop.security.AuthenticationFilterInitializer</value>
+    </property>
 </configuration>
