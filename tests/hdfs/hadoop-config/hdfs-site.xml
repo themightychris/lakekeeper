@@ -4,7 +4,7 @@
     <!-- NameNode security config -->
     <property>
         <name>dfs.namenode.kerberos.principal</name>
-        <value>nn@EXAMPLE.COM</value>
+        <value>hdfs/_HOST@EXAMPLE.COM</value>
     </property>
     <property>
         <name>dfs.namenode.name.dir</name>
@@ -22,7 +22,7 @@
     <!-- DataNode security config -->
     <property>
         <name>dfs.datanode.kerberos.principal</name>
-        <value>dn@EXAMPLE.COM</value>
+        <value>hdfs/datanode@EXAMPLE.COM</value>
     </property>
     <property>
         <name>dfs.datanode.keytab.file</name>
@@ -71,9 +71,5 @@
     <property>
         <name>dfs.http.policy</name>
         <value>HTTPS_ONLY</value>
-    </property>
-    <property>
-        <name>dfs.namenode.kerberos.principal</name>
-        <value>hdfs/namenode.example.com@EXAMPLE.COM</value>
     </property>
 </configuration>

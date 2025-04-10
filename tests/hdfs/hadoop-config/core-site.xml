@@ -3,7 +3,7 @@
 <configuration>
     <property>
         <name>fs.defaultFS</name>
-        <value>hdfs://namenode.example.com:8020</value>
+        <value>hdfs://namenode:8020</value>
     </property>
 
     <!-- Security properties -->
@@ -37,10 +37,11 @@
     <property>
         <name>hadoop.security.auth_to_local</name>
         <value>
-            RULE:[2:$1/$2@$0]([ndj]n/.*@EXAMPLE.COM)s/.*/hdfs/
-            RULE:[2:$1/$2@$0]([rn]m/.*@EXAMPLE.COM)s/.*/yarn/
+            RULE:[1:$1]
+            RULE:[2:$1]
             DEFAULT
         </value>
+        <description>Rules for mapping Kerberos principals to local user names</description>
     </property>
     <!-- Required for secure DataNode -->
     <property>
@@ -57,6 +58,6 @@
     </property>
     <property>
         <name>hadoop.security.service.user.name.key</name>
-        <value>hdfs/tests-namenode-1@EXAMPLE.COM</value>
+        <value>hdfs/namenode@EXAMPLE.COM</value>
     </property>
 </configuration>

@@ -19,10 +19,12 @@ use iceberg_ext::{
 };
 pub use s3::{S3Credential, S3Flavor, S3Location, S3Profile};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 use super::{secrets::SecretInStorage, NamespaceIdentUuid, TableIdentUuid};
 use crate::{
+    api,
     api::{iceberg::v1::DataAccess, CatalogConfig},
     catalog::{
         compression_codec::CompressionCodec,
@@ -114,9 +116,11 @@ impl StorageProfile {
             }
             StorageProfile::Adls(prof) => prof.generate_catalog_config(warehouse_id),
             StorageProfile::Gcs(prof) => prof.generate_catalog_config(warehouse_id),
-            StorageProfile::Hdfs(prof) => {
-                todo!()
-            }
+            StorageProfile::Hdfs(_prof) => CatalogConfig {
+                overrides: HashMap::default(),
+                defaults: HashMap::default(),
+                endpoints: api::iceberg::supported_endpoints().to_vec(),
+            },
         }
     }
 

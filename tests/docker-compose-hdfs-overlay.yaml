@@ -1,5 +1,6 @@
 services:
   server:
+    hostname: server
     environment:
       - KRB5CCNAME=FILE:/tickets/krb5cc_0
       - KRB5_CONFIG=/etc/krb5.conf
@@ -14,6 +15,9 @@ services:
       - ./hdfs/hadoop-config/hdfs-site.xml:/etc/hadoop/hdfs-site.xml:ro
     depends_on:
       - kerberos-sidecar
+    networks:
+      iceberg_rest_tests:
+
   # Kerberos KDC (Key Distribution Center)
   keycloak:
     ports:
@@ -47,22 +51,19 @@ services:
       # Create principals
       kadmin.local -q 'addprinc -pw admin admin/admin'
       echo '*/admin@EXAMPLE.COM *' > /var/kerberos/krb5kdc/kadm5.acl
-      kadmin.local -q 'addprinc -pw password app@EXAMPLE.COM'
-      # Missing principal creations
-      kadmin.local -q 'addprinc -pw password nn@EXAMPLE.COM'
-      kadmin.local -q 'addprinc -pw password dn@EXAMPLE.COM'
-      kadmin.local -q 'addprinc -randkey HTTP/namenode.example.com@EXAMPLE.COM'
-      kadmin.local -q 'addprinc -randkey hdfs/namenode.example.com@EXAMPLE.COM'
-      # In the kdc service command section, add:
-      kadmin.local -q 'addprinc -randkey hdfs/tests-namenode-1@EXAMPLE.COM'
-      kadmin.local -q 'ktadd -k /keytabs/nn.keytab hdfs/tests-namenode-1@EXAMPLE.COM'      # Create keytabs
-      kadmin.local -q 'ktadd -k /keytabs/app.keytab app@EXAMPLE.COM'
-      kadmin.local -q 'ktadd -k /keytabs/nn.keytab hdfs/namenode.example.com@EXAMPLE.COM'
-      kadmin.local -q 'ktadd -k /keytabs/nn.keytab nn@EXAMPLE.COM'
-      kadmin.local -q 'ktadd -k /keytabs/nn.keytab HTTP/namenode.example.com@EXAMPLE.COM'
-      kadmin.local -q 'ktadd -k /keytabs/dn.keytab dn@EXAMPLE.COM'
-      chmod 644 /keytabs/*.keytab
-
+      
+      # Service principals
+      kadmin.local -q 'addprinc -randkey hdfs/namenode@EXAMPLE.COM'
+      kadmin.local -q 'addprinc -randkey HTTP/namenode@EXAMPLE.COM'
+      kadmin.local -q 'addprinc -randkey hdfs/datanode@EXAMPLE.COM'
+      
+      # Client principal
+      kadmin.local -q 'addprinc -randkey hdfs/server@EXAMPLE.COM'
+      
+      # Create keytabs
+      kadmin.local -q 'ktadd -k /keytabs/dn.keytab hdfs/datanode@EXAMPLE.COM'
+      kadmin.local -q 'ktadd -k /keytabs/app.keytab hdfs/server@EXAMPLE.COM'
+      kadmin.local -q 'ktadd -k /keytabs/nn.keytab hdfs/namenode@EXAMPLE.COM HTTP/namenode@EXAMPLE.COM'
       # Create ready file explicitly
       echo 'Keytab created' > /keytabs/ready
       chmod 644 /keytabs/ready
@@ -84,8 +85,8 @@ services:
   # HDFS NameNode with Kerberos
   namenode:
     image: apache/hadoop:3
-    hostname: namenode.example.com
-    container_name: tests-namenode-1
+    hostname: namenode
+    container_name: namenode
     user: root
     depends_on:
       kerberos-sidecar:
@@ -93,8 +94,10 @@ services:
     environment:
       HADOOP_CONF_DIR: /etc/hadoop
       KRB5_CONFIG: /etc/krb5.conf
-      HADOOP_OPTS: "-Djava.security.krb5.conf=/etc/krb5.conf"
+      HADOOP_OPTS: "-Djava.security.krb5.conf=/etc/krb5.conf -Dsun.security.spnego.debug=true -Djava.security.krb5.debug=true -Dsun.security.krb5.debug=true"
+#        HADOOP_OPTS: "${HADOOP_OPTS} -Dsun.security.krb5.debug=true -Dsun.security.spnego.debug=true"
       KRB5CCNAME: /tickets/krb5cc_0
+      HADOOP_JAAS_DEBUG: "true"
     volumes:
       - kerberos-tickets:/tickets:ro
       - ./hdfs/hadoop-config:/etc/hadoop:ro
@@ -112,7 +115,7 @@ services:
         hdfs namenode
       '
     healthcheck:
-      test: ["CMD", "bash", "-c", "export KRB5CCNAME=/tmp/ticks && kinit -kt /etc/hadoop/keytabs/nn.keytab nn && hdfs dfsadmin -report"]
+      test: ["CMD", "bash", "-c", "export KRB5CCNAME=/tmp/ticks && kinit -kt /etc/hadoop/keytabs/nn.keytab hdfs/namenode@EXAMPLE.COM && hdfs dfsadmin -report"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -120,12 +123,11 @@ services:
     networks:
       iceberg_rest_tests:
         aliases:
-          - namenode.example.com
-          - tests-namenode-1
+          - namenode
   # HDFS DataNode with Kerberos
   datanode:
     image: apache/hadoop:3
-    hostname: datanode.example.com
+    hostname: datanode
     user: root
     depends_on:
       namenode:
@@ -162,7 +164,7 @@ services:
     networks:
       iceberg_rest_tests:
         aliases:
-          - datanode.example.com
+          - datanode
   # Kerberos authentication sidecar
   kerberos-sidecar:
     image: ubuntu:22.04
@@ -193,22 +195,16 @@ services:
         echo "Using ticket cache: $KRB5CCNAME"
 
         klist -kte /keytabs/app.keytab
-        klist -kte /keytabs/nn.keytab
-        klist -kte /keytabs/dn.keytab
       
-        kinit -V -kt /keytabs/app.keytab app@EXAMPLE.COM
-        kinit -V -kt /keytabs/dn.keytab dn@EXAMPLE.COM
-        kinit -V -kt /keytabs/nn.keytab nn@EXAMPLE.COM
-
+        # Try both principals for authentication
+        kinit -kt /keytabs/app.keytab hdfs/server@EXAMPLE.COM
       
         if [ $? -eq 0 ]; then
           echo "SUCCESS: Authentication worked!"
           klist
           while true; do
             sleep 3600
-            kinit -kt /keytabs/app.keytab app
-            kinit -kt /keytabs/dn.keytab dn
-            kinit -kt /keytabs/nn.keytab nn
+            kinit -kt /keytabs/app.keytab hdfs/server@EXAMPLE.COM
           done
         else
           echo "FAILED: Authentication failed"
@@ -218,11 +214,8 @@ services:
       '
     networks:
       iceberg_rest_tests:
-        aliases:
-          - kerberos-sidecar.example.com
     healthcheck:
-      test: ["CMD", "kinit", "-kt", "/keytabs/app.keytab", "app"]
-      interval: 5s
+      test: ["CMD", "kinit", "-kt", "/keytabs/app.keytab", "hdfs/server@EXAMPLE.COM"]
       timeout: 3s
       retries: 10
       start_period: 10s
