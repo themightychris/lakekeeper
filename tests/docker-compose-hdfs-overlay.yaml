@@ -1,11 +1,14 @@
 services:
   server:
     environment:
-      - KRB5CCNAME=/tickets/krb5cc_0
+      - KRB5CCNAME=FILE:/tickets/krb5cc_0
       - KRB5_CONFIG=/etc/krb5.conf
       - HADOOP_CONF_DIR=/etc/hadoop
+      - LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu
+      - KRB5_TRACE=/dev/stderr
+      - RUST_LOG=debug,hdfs_native=trace
     volumes:
-      - kerberos-tickets:/tickets:ro
+      - ./kerberos-tickets:/tickets:ro
       - ./hdfs/krb5.conf:/etc/krb5.conf:ro
       - ./hdfs/hadoop-config/core-site.xml:/etc/hadoop/core-site.xml:ro
       - ./hdfs/hadoop-config/hdfs-site.xml:/etc/hadoop/hdfs-site.xml:ro
@@ -15,6 +18,8 @@ services:
   keycloak:
     ports:
       - "8080:8080"
+      - "88:88/tcp"
+      - "88:88/udp"
   kdc:
     image: sequenceiq/kerberos:latest
     hostname: kdc.example.com
@@ -46,10 +51,15 @@ services:
       # Missing principal creations
       kadmin.local -q 'addprinc -pw password nn@EXAMPLE.COM'
       kadmin.local -q 'addprinc -pw password dn@EXAMPLE.COM'
-      
-      # Create keytabs
+      kadmin.local -q 'addprinc -randkey HTTP/namenode.example.com@EXAMPLE.COM'
+      kadmin.local -q 'addprinc -randkey hdfs/namenode.example.com@EXAMPLE.COM'
+      # In the kdc service command section, add:
+      kadmin.local -q 'addprinc -randkey hdfs/tests-namenode-1@EXAMPLE.COM'
+      kadmin.local -q 'ktadd -k /keytabs/nn.keytab hdfs/tests-namenode-1@EXAMPLE.COM'      # Create keytabs
       kadmin.local -q 'ktadd -k /keytabs/app.keytab app@EXAMPLE.COM'
+      kadmin.local -q 'ktadd -k /keytabs/nn.keytab hdfs/namenode.example.com@EXAMPLE.COM'
       kadmin.local -q 'ktadd -k /keytabs/nn.keytab nn@EXAMPLE.COM'
+      kadmin.local -q 'ktadd -k /keytabs/nn.keytab HTTP/namenode.example.com@EXAMPLE.COM'
       kadmin.local -q 'ktadd -k /keytabs/dn.keytab dn@EXAMPLE.COM'
       chmod 644 /keytabs/*.keytab
 
@@ -71,62 +81,100 @@ services:
       iceberg_rest_tests:
         aliases:
           - kdc.example.com
-
   # HDFS NameNode with Kerberos
   namenode:
     image: apache/hadoop:3
     hostname: namenode.example.com
+    container_name: tests-namenode-1
+    user: root
     depends_on:
-      - kdc
+      kerberos-sidecar:
+        condition: service_healthy
     environment:
       HADOOP_CONF_DIR: /etc/hadoop
       KRB5_CONFIG: /etc/krb5.conf
       HADOOP_OPTS: "-Djava.security.krb5.conf=/etc/krb5.conf"
+      KRB5CCNAME: /tickets/krb5cc_0
     volumes:
+      - kerberos-tickets:/tickets:ro
       - ./hdfs/hadoop-config:/etc/hadoop:ro
+      - ./hdfs/ssl:/etc/hadoop/ssl:rw
       - ./keytabs:/etc/hadoop/keytabs:ro
       - ./hdfs/krb5.conf:/etc/krb5.conf:ro
       - namenode-data:/hadoop/dfs/name
-    command: ["hdfs", "namenode"]
+    command: >
+      bash -c '
+        keytool -genkeypair -alias localhost -keyalg RSA -keysize 2048 -dname "CN=localhost" \
+          -keypass password -keystore /etc/hadoop/ssl/server.keystore.jks -storepass password
+        cp /etc/hadoop/ssl/server.keystore.jks /etc/hadoop/ssl/client.truststore.jks
+        echo "Formatting namenode directory"
+        hdfs namenode -format -force
+        hdfs namenode
+      '
+    healthcheck:
+      test: ["CMD", "bash", "-c", "export KRB5CCNAME=/tmp/ticks && kinit -kt /etc/hadoop/keytabs/nn.keytab nn && hdfs dfsadmin -report"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     networks:
       iceberg_rest_tests:
         aliases:
           - namenode.example.com
-
+          - tests-namenode-1
   # HDFS DataNode with Kerberos
   datanode:
     image: apache/hadoop:3
     hostname: datanode.example.com
+    user: root
     depends_on:
-      - namenode
-      - kdc
+      namenode:
+        condition: service_healthy
+      kerberos-sidecar:
+        condition: service_healthy
     environment:
       HADOOP_CONF_DIR: /etc/hadoop
       KRB5_CONFIG: /etc/krb5.conf
-      HADOOP_OPTS: "-Djava.security.krb5.conf=/etc/krb5.conf"
+      HADOOP_OPTS: "-Djava.security.krb5.conf=/etc/krb5.conf -Dhadoop.ssl.server.conf=/etc/hadoop/ssl-server.xml"
+      KRB5CCNAME: /tickets/krb5cc_0
     volumes:
+      - kerberos-tickets:/tickets:ro
       - ./hdfs/hadoop-config:/etc/hadoop:ro
       - ./keytabs:/etc/hadoop/keytabs:ro
       - ./hdfs/krb5.conf:/etc/krb5.conf:ro
       - datanode-data:/hadoop/dfs/data
-    command: ["hdfs", "datanode"]
+      - ./hdfs/ssl:/etc/hadoop/ssl:ro
+      - ./hdfs/hadoop-config/ssl-server.xml:/etc/hadoop/ssl-server.xml:ro
+    command: >
+      bash -c '
+        # Wait for keystore files to exist
+        while [ ! -f /etc/hadoop/ssl/server.keystore.jks ]; do
+          echo "Waiting for keystore files..."
+          sleep 2
+        done
+      
+        # Ensure permissions are correct
+        chmod 644 /etc/hadoop/ssl/*.jks
+      
+        # Start datanode
+        hdfs datanode
+      '
     networks:
       iceberg_rest_tests:
         aliases:
           - datanode.example.com
-
   # Kerberos authentication sidecar
   kerberos-sidecar:
     image: ubuntu:22.04
     depends_on:
       - kdc
     volumes:
-      - kerberos-tickets:/tickets
+      - ./kerberos-tickets:/tickets
       - ./keytabs:/keytabs:ro
-      # Mount krb5.conf to a different location initially
       - ./hdfs/krb5.conf:/tmp/krb5.conf:ro
     environment:
       - DEBIAN_FRONTEND=noninteractive
+      - KRB5CCNAME=/tickets/krb5cc_0
     command: >
       bash -c '
         echo "Using mounted krb5.conf:"
@@ -142,7 +190,6 @@ services:
           sleep 5
         done
         echo "running"
-        export KRB5CCNAME=/tickets/krb5cc_0
         echo "Using ticket cache: $KRB5CCNAME"
 
         klist -kte /keytabs/app.keytab
@@ -160,6 +207,8 @@ services:
           while true; do
             sleep 3600
             kinit -kt /keytabs/app.keytab app
+            kinit -kt /keytabs/dn.keytab dn
+            kinit -kt /keytabs/nn.keytab nn
           done
         else
           echo "FAILED: Authentication failed"
@@ -171,7 +220,12 @@ services:
       iceberg_rest_tests:
         aliases:
           - kerberos-sidecar.example.com
-
+    healthcheck:
+      test: ["CMD", "kinit", "-kt", "/keytabs/app.keytab", "app"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
   jupyter:
     image: quay.io/jupyter/pyspark-notebook:2024-10-14
     depends_on:
@@ -184,6 +238,7 @@ services:
       iceberg_rest_tests:
     ports:
       - "8888:8888"
+
 networks:
   iceberg_rest_tests:
     driver: bridge

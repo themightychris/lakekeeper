@@ -7,7 +7,15 @@
         <value>nn@EXAMPLE.COM</value>
     </property>
     <property>
+        <name>dfs.namenode.name.dir</name>
+        <value>/hadoop/dfs/name</value>
+    </property>
+    <property>
         <name>dfs.namenode.keytab.file</name>
+        <value>/etc/hadoop/keytabs/nn.keytab</value>
+    </property>
+    <property>
+        <name>dfs.web.authentication.kerberos.keytab</name>
         <value>/etc/hadoop/keytabs/nn.keytab</value>
     </property>
 
@@ -22,11 +30,15 @@
     </property>
     <property>
         <name>dfs.datanode.address</name>
-        <value>0.0.0.0:1004</value>
+        <value>0.0.0.0:50010</value>
     </property>
     <property>
         <name>dfs.datanode.http.address</name>
-        <value>0.0.0.0:1006</value>
+        <value>0.0.0.0:50075</value>
+    </property>
+    <property>
+        <name>dfs.datanode.https.address</name>
+        <value>0.0.0.0:50475</value>
     </property>
 
     <!-- Web UI security config -->
@@ -51,5 +63,17 @@
     <property>
         <name>dfs.data.transfer.protection</name>
         <value>privacy</value>
+    </property>
+    <property>
+        <name>dfs.encrypt.data.transfer</name>
+        <value>true</value>
+    </property>
+    <property>
+        <name>dfs.http.policy</name>
+        <value>HTTPS_ONLY</value>
+    </property>
+    <property>
+        <name>dfs.namenode.kerberos.principal</name>
+        <value>hdfs/namenode.example.com@EXAMPLE.COM</value>
     </property>
 </configuration>

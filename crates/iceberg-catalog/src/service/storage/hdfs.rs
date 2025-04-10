@@ -43,7 +43,7 @@ impl HdfsProfile {
             ValidationError::InvalidLocation {
                 source: Some(Box::new(e)),
                 reason: "Failed to create location for storage profile.".to_string(),
-                storage_type: StorageType::Adls,
+                storage_type: StorageType::Hdfs,
                 location: self.prefix.clone(),
             }
         })
@@ -68,6 +68,7 @@ pub(crate) mod test {
     async fn test_can_validate() {
         let (minidfs, hdfs_profile, cred) = test_profile();
         let prof = StorageProfile::Hdfs(hdfs_profile);
+        hdfs_native::client::Client::new_with_config();
         prof.validate_access(None, None).await.unwrap()
     }
 

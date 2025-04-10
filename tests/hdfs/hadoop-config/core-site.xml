@@ -19,6 +19,19 @@
         <name>hadoop.rpc.protection</name>
         <value>privacy</value>
     </property>
+    <property>
+        <name>dfs.data.transfer.protection</name>
+        <value>privacy</value>
+    </property>
+
+    <property>
+        <name>hadoop.http.authentication.kerberos.keytab</name>
+        <value>/etc/hadoop/keytabs/nn.keytab</value>
+    </property>
+    <property>
+        <name>hadoop.http.authentication.kerberos.principal</name>
+        <value>HTTP/_HOST@EXAMPLE.COM</value>
+    </property>
 
     <!-- Specify the kerberos principal to be used -->
     <property>
@@ -37,5 +50,13 @@
     <property>
         <name>hadoop.http.filter.initializers</name>
         <value>org.apache.hadoop.security.AuthenticationFilterInitializer</value>
+    </property>
+    <property>
+        <name>dfs.http.policy</name>
+        <value>HTTPS_ONLY</value>
+    </property>
+    <property>
+        <name>hadoop.security.service.user.name.key</name>
+        <value>hdfs/tests-namenode-1@EXAMPLE.COM</value>
     </property>
 </configuration>
