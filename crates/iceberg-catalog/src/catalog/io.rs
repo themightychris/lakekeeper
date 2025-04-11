@@ -31,10 +31,8 @@ impl FileIO {
             }
             FileIO::HdfsNative(hdfs) => {
                 eprintln!("{metadata_location}");
-                let metadata_location = metadata_location
-                    .as_str()
-                    .strip_prefix(&format!("{}://", metadata_location.scheme()))
-                    .unwrap();
+                let metadata_location = normalize_location(&metadata_location);
+
                 eprintln!("{metadata_location}");
                 let buf = serde_json::to_vec(&metadata).map_err(IoError::Serialization)?;
 
@@ -59,10 +57,8 @@ impl FileIO {
         match self {
             FileIO::FileIO(file_io) => read_file(file_io, file).await,
             FileIO::HdfsNative(hdfs) => {
-                let file = file
-                    .as_str()
-                    .strip_prefix(&format!("{}://", file.scheme()))
-                    .unwrap();
+                let file = normalize_location(&file);
+
                 let content = hdfs
                     .get(&object_store::path::Path::from(file))
                     .await
@@ -95,10 +91,8 @@ impl FileIO {
         match self {
             FileIO::FileIO(file_io) => remove_all(file_io, location).await,
             FileIO::HdfsNative(hdfs) => {
-                let location = location
-                    .as_str()
-                    .strip_prefix(&format!("{}://", location.scheme()))
-                    .unwrap();
+                let location = normalize_location(&location);
+
                 let files = hdfs
                     .list(Some(&object_store::path::Path::from(location)))
                     .map(|p| p.map(|p| p.location));
@@ -120,10 +114,8 @@ impl FileIO {
         match self {
             FileIO::FileIO(file_io) => delete_file(file_io, location).await,
             FileIO::HdfsNative(hdfs) => {
-                let location = location
-                    .as_str()
-                    .strip_prefix(&format!("{}://", location.scheme()))
-                    .unwrap();
+                let location = normalize_location(&location);
+
                 hdfs.delete(&object_store::path::Path::from(location))
                     .await
                     .map_err(|e| {
@@ -142,10 +134,8 @@ impl FileIO {
         match self {
             FileIO::FileIO(file_io) => list_location(file_io, location, page_size).await,
             FileIO::HdfsNative(hdfs) => {
-                let location = location
-                    .as_str()
-                    .strip_prefix(&format!("{}://", location.scheme()))
-                    .unwrap();
+                let location = normalize_location(&location);
+
                 Ok(hdfs
                     .list(Some(&object_store::path::Path::from(location)))
                     .map(|p| p.map(|p| p.location.to_string()))
@@ -167,6 +157,19 @@ impl FileIO {
 fn normalize_location(location: &Location) -> String {
     if location.as_str().starts_with("abfs") {
         reduce_azure_scheme(location.as_str(), false)
+    } else if location.scheme().starts_with("hdfs") {
+        let mut prefix = String::from(location.scheme());
+        prefix.push_str("://");
+        if let Some(host) = location.url().host() {
+            prefix.push_str(&host.to_string());
+        }
+        if let Some(port) = location.url().port() {
+            prefix.push_str(&format!(":{port}"));
+        }
+        location
+            .as_str()
+            .strip_prefix(&prefix)
+            .map_or_else(|| location.as_str().to_string(), ToString::to_string)
     } else if location.scheme().starts_with("s3") {
         if location.scheme() == "s3" {
             location.to_string()
@@ -491,5 +494,13 @@ mod tests {
     async fn test_remove_all_hdfs() {
         let (dfs, prof, creds) = hdfs::test::test_profile();
         test_remove_all(creds, StorageProfile::Hdfs(prof)).await
+    }
+
+    #[test]
+    fn test_normalize_hdfs() {
+        let loc = "hdfs://namenode:8020/user/hdfs/019625f2-668e-7173-bb4d-65ace9b475f1/019625f2-668e-7173-bb4d-65bb757efa94/metadata/test";
+        let loc = Location::parse_value(loc).unwrap();
+        let loc = normalize_location(&loc);
+        assert_eq!("/user/hdfs/019625f2-668e-7173-bb4d-65ace9b475f1/019625f2-668e-7173-bb4d-65bb757efa94/metadata/test", loc);
     }
 }

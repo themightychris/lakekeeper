@@ -39,14 +39,17 @@ impl HdfsProfile {
     }
 
     pub fn base_location(&self) -> Result<Location, ValidationError> {
-        Location::parse_value(&format!("hdfs://{}/{}", self.url, self.prefix.as_str())).map_err(
-            |e| ValidationError::InvalidLocation {
-                source: Some(Box::new(e)),
-                reason: "Failed to create location for storage profile.".to_string(),
-                storage_type: StorageType::Hdfs,
-                location: self.prefix.clone(),
-            },
-        )
+        Location::parse_value(&format!(
+            "{}/{}",
+            self.url.as_str().trim_end_matches('/'),
+            self.prefix.as_str().trim_start_matches('/')
+        ))
+        .map_err(|e| ValidationError::InvalidLocation {
+            source: Some(Box::new(e)),
+            reason: "Failed to create location for storage profile.".to_string(),
+            storage_type: StorageType::Hdfs,
+            location: self.prefix.clone(),
+        })
     }
 }
 
@@ -68,7 +71,6 @@ pub(crate) mod test {
     async fn test_can_validate() {
         let (minidfs, hdfs_profile, cred) = test_profile();
         let prof = StorageProfile::Hdfs(hdfs_profile);
-        hdfs_native::client::Client::new_with_config();
         prof.validate_access(None, None).await.unwrap()
     }
 
