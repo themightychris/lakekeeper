@@ -6,6 +6,8 @@ pub(crate) mod gcs;
 pub(crate) mod hdfs;
 pub(crate) mod s3;
 
+use std::collections::HashMap;
+
 pub use az::{AdlsLocation, AdlsProfile, AzCredential};
 pub(crate) use error::ValidationError;
 use error::{ConversionError, CredentialsError, FileIoError, TableConfigError, UpdateError};
@@ -19,7 +21,6 @@ use iceberg_ext::{
 };
 pub use s3::{S3Credential, S3Flavor, S3Location, S3Profile};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use uuid::Uuid;
 
 use super::{secrets::SecretInStorage, NamespaceIdentUuid, TableIdentUuid};

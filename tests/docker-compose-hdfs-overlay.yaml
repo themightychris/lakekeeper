@@ -5,7 +5,6 @@ services:
       - KRB5CCNAME=FILE:/tickets/krb5cc_0
       - KRB5_CONFIG=/etc/krb5.conf
       - HADOOP_CONF_DIR=/etc/hadoop
-      - LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu
       - KRB5_TRACE=/dev/stderr
       - RUST_LOG=debug,hdfs_native=trace
     volumes:
@@ -225,8 +224,17 @@ services:
       server:
         condition: service_healthy
     command: start-notebook.sh --NotebookApp.token=''
+    environment:
+      - KRB5CCNAME=FILE:/tickets/krb5cc_0
+      - KRB5_CONFIG=/etc/krb5.conf
+      - HADOOP_CONF_DIR=/etc/hadoop
+      - KRB5_TRACE=/dev/stderr
     volumes:
       - ./notebooks:/home/jovyan/examples/
+      - ./kerberos-tickets:/tickets:ro
+      - ./hdfs/krb5.conf:/etc/krb5.conf:ro
+      - ./hdfs/hadoop-config/core-site.xml:/etc/hadoop/core-site.xml:ro
+      - ./hdfs/hadoop-config/hdfs-site.xml:/etc/hadoop/hdfs-site.xml:ro
     networks:
       iceberg_rest_tests:
     ports:

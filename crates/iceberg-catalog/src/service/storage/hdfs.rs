@@ -39,14 +39,14 @@ impl HdfsProfile {
     }
 
     pub fn base_location(&self) -> Result<Location, ValidationError> {
-        Location::parse_value(&format!("hdfs://{}", self.prefix.as_str())).map_err(|e| {
-            ValidationError::InvalidLocation {
+        Location::parse_value(&format!("hdfs://{}/{}", self.url, self.prefix.as_str())).map_err(
+            |e| ValidationError::InvalidLocation {
                 source: Some(Box::new(e)),
                 reason: "Failed to create location for storage profile.".to_string(),
                 storage_type: StorageType::Hdfs,
                 location: self.prefix.clone(),
-            }
-        })
+            },
+        )
     }
 }
 
