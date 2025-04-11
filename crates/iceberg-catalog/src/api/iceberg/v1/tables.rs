@@ -36,6 +36,8 @@ pub struct ListTablesQuery {
     /// Default is false.
     #[serde(default)]
     pub return_uuids: bool,
+    #[serde(default)]
+    pub return_protection_status: bool,
 }
 
 impl From<ListTablesQuery> for PaginationQuery {

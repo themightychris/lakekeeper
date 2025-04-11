@@ -1,3 +1,4 @@
+mod drop_recursive;
 mod endpoint_stats;
 mod stats;
 
@@ -15,8 +16,10 @@ use crate::{
         iceberg::{
             types::Prefix,
             v1::{
-                namespace::Service as _, tables::TablesService, views::Service, DataAccess,
-                DropParams, NamespaceParameters, TableParameters,
+                namespace::{NamespaceDropFlags, NamespaceService as _},
+                tables::TablesService,
+                views::ViewService,
+                DataAccess, DropParams, NamespaceParameters, TableParameters,
             },
         },
         management::v1::{
@@ -41,7 +44,7 @@ use crate::{
             StorageProfile, TestProfile,
         },
         task_queue::{TaskQueueConfig, TaskQueues},
-        State, UserId,
+        Catalog, SecretStore, State, UserId,
     },
     WarehouseIdent, CONFIG,
 };
@@ -107,16 +110,16 @@ pub(crate) async fn create_ns<T: Authorizer>(
 
 pub(crate) async fn create_table<T: Authorizer>(
     api_context: ApiContext<State<T, PostgresCatalog, SecretsState>>,
-    prefix: &str,
-    ns_name: &str,
-    name: &str,
+    prefix: impl Into<String>,
+    ns_name: impl Into<String>,
+    name: impl Into<String>,
 ) -> crate::api::Result<LoadTableResult> {
     CatalogServer::create_table(
         NamespaceParameters {
-            prefix: Some(Prefix(prefix.to_string())),
-            namespace: NamespaceIdent::new(ns_name.to_string()),
+            prefix: Some(Prefix(prefix.into())),
+            namespace: NamespaceIdent::new(ns_name.into()),
         },
-        crate::catalog::tables::test::create_request(Some(name.to_string())),
+        crate::catalog::tables::test::create_request(Some(name.into())),
         DataAccess::none(),
         api_context,
         random_request_metadata(),
@@ -130,13 +133,17 @@ pub(crate) async fn drop_table<T: Authorizer>(
     ns_name: &str,
     name: &str,
     purge_requested: Option<bool>,
+    force: bool,
 ) -> crate::api::Result<()> {
     CatalogServer::drop_table(
         TableParameters {
             prefix: Some(Prefix(prefix.to_string())),
             table: TableIdent::new(NamespaceIdent::new(ns_name.to_string()), name.to_string()),
         },
-        DropParams { purge_requested },
+        DropParams {
+            purge_requested: purge_requested.unwrap_or_default(),
+            force,
+        },
         api_context,
         random_request_metadata(),
     )
@@ -158,6 +165,20 @@ pub(crate) async fn create_view<T: Authorizer>(
         crate::catalog::views::create::test::create_view_request(Some(name), location),
         api_context,
         DataAccess::none(),
+        random_request_metadata(),
+    )
+    .await
+}
+
+pub(crate) async fn drop_namespace<A: Authorizer, C: Catalog, S: SecretStore>(
+    api_context: ApiContext<State<A, C, S>>,
+    flags: NamespaceDropFlags,
+    namespace_parameters: NamespaceParameters,
+) -> crate::api::Result<()> {
+    CatalogServer::drop_namespace(
+        namespace_parameters,
+        flags,
+        api_context,
         random_request_metadata(),
     )
     .await

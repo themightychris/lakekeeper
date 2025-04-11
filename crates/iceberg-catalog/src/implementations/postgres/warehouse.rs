@@ -1,13 +1,14 @@
 use std::{collections::HashSet, ops::Deref};
 
-use sqlx::{types::Json, Error, PgPool};
+use sqlx::{types::Json, PgPool};
 
 use super::{dbutils::DBErrorHandler as _, CatalogState};
 use crate::{
     api::{
         iceberg::v1::{PaginationQuery, MAX_PAGE_SIZE},
-        management::v1::warehouse::{
-            TabularDeleteProfile, WarehouseStatistics, WarehouseStatisticsResponse,
+        management::v1::{
+            warehouse::{TabularDeleteProfile, WarehouseStatistics, WarehouseStatisticsResponse},
+            DeleteWarehouseQuery, ProtectionResponse,
         },
         CatalogConfig, ErrorModel, Result,
     },
@@ -301,6 +302,7 @@ pub(crate) async fn list_warehouses<
         status: WarehouseStatus,
         tabular_delete_mode: DbTabularDeleteProfile,
         tabular_expiration_seconds: Option<i64>,
+        protected: bool,
     }
 
     let include_status = include_status.unwrap_or_else(|| vec![WarehouseStatus::Active]);
@@ -314,7 +316,8 @@ pub(crate) async fn list_warehouses<
                 storage_secret_id,
                 status AS "status: WarehouseStatus",
                 tabular_delete_mode as "tabular_delete_mode: DbTabularDeleteProfile",
-                tabular_expiration_seconds
+                tabular_expiration_seconds,
+                protected
             FROM warehouse
             WHERE project_id = $1
             AND status = ANY($2)
@@ -352,6 +355,7 @@ pub(crate) async fn list_warehouses<
                 storage_secret_id: warehouse.storage_secret_id.map(std::convert::Into::into),
                 status: warehouse.status,
                 tabular_delete_profile,
+                protected: warehouse.protected,
             })
         })
         .collect::<Result<Vec<_>>>()
@@ -370,7 +374,8 @@ pub(crate) async fn get_warehouse(
             storage_secret_id,
             status AS "status: WarehouseStatus",
             tabular_delete_mode as "tabular_delete_mode: DbTabularDeleteProfile",
-            tabular_expiration_seconds
+            tabular_expiration_seconds,
+            protected
         FROM warehouse
         WHERE warehouse_id = $1
         "#,
@@ -404,6 +409,7 @@ pub(crate) async fn get_warehouse(
             storage_secret_id: warehouse.storage_secret_id.map(std::convert::Into::into),
             status: warehouse.status,
             tabular_delete_profile,
+            protected: warehouse.protected,
         }))
     } else {
         Ok(None)
@@ -439,15 +445,29 @@ pub(crate) async fn list_projects<'e, 'c: 'e, E: sqlx::Executor<'c, Database = s
 
 pub(crate) async fn delete_warehouse(
     warehouse_id: WarehouseIdent,
+    DeleteWarehouseQuery { force }: DeleteWarehouseQuery,
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
 ) -> Result<()> {
-    let row_count = sqlx::query_scalar!(
-        r#"DELETE FROM warehouse WHERE warehouse_id = $1"#,
-        *warehouse_id
+    let protected = sqlx::query_scalar!(
+        r#"WITH delete_info as (
+               SELECT
+                   protected
+               FROM warehouse
+               WHERE warehouse_id = $1
+           ),
+           deleted as (DELETE FROM warehouse WHERE warehouse_id = $1 AND (not protected OR $2))
+           SELECT protected as "protected!" FROM delete_info"#,
+        *warehouse_id,
+        force
     )
-    .execute(&mut **transaction)
+    .fetch_one(&mut **transaction)
     .await
     .map_err(|e| match &e {
+        sqlx::Error::RowNotFound => ErrorModel::not_found(
+            format!("Warehouse '{warehouse_id}' not found"),
+            "WarehouseNotFound",
+            Some(Box::new(e)),
+        ),
         sqlx::Error::Database(db_error) => {
             if db_error.is_foreign_key_violation() {
                 ErrorModel::conflict(
@@ -460,11 +480,12 @@ pub(crate) async fn delete_warehouse(
             }
         }
         _ => e.into_error_model("Error deleting warehouse"),
-    })?
-    .rows_affected();
+    })?;
 
-    if row_count == 0 {
-        return Err(ErrorModel::not_found("Warehouse not found", "WarehouseNotFound", None).into());
+    if protected && !force {
+        return Err(
+            ErrorModel::conflict("Warehouse is protected", "WarehouseProtected", None).into(),
+        );
     }
 
     Ok(())
@@ -519,6 +540,38 @@ pub(crate) async fn set_warehouse_status(
     Ok(())
 }
 
+pub(crate) async fn set_warehouse_protection(
+    warehouse_id: WarehouseIdent,
+    protected: bool,
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<ProtectionResponse> {
+    let row = sqlx::query!(
+        "UPDATE warehouse
+            SET protected = $1
+            WHERE warehouse_id = $2
+            returning protected, updated_at",
+        protected,
+        *warehouse_id
+    )
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(|e| {
+        if let sqlx::Error::RowNotFound = e {
+            return ErrorModel::not_found(
+                format!("Warehouse '{warehouse_id}' not found"),
+                "WarehouseNotFound",
+                Some(Box::new(e)),
+            );
+        }
+        e.into_error_model("Error setting warehouse protection")
+    })?;
+
+    Ok(ProtectionResponse {
+        protected: row.protected,
+        updated_at: row.updated_at,
+    })
+}
+
 pub(crate) async fn update_storage_profile(
     warehouse_id: WarehouseIdent,
     storage_profile: StorageProfile,
@@ -556,7 +609,7 @@ pub(crate) async fn update_storage_profile(
     Ok(())
 }
 
-fn map_select_warehouse_err(e: Error) -> ErrorModel {
+fn map_select_warehouse_err(e: sqlx::Error) -> ErrorModel {
     ErrorModel::internal(
         "Error fetching warehouse",
         "WarehouseFetchError",
@@ -601,10 +654,25 @@ pub(crate) async fn get_warehouse_stats(
 
     let stats = sqlx::query!(
         r#"
-        SELECT number_of_views, number_of_tables, created_at, updated_at, timestamp
-        FROM warehouse_statistics
-        WHERE warehouse_id = $1
-        AND (timestamp < $2 OR $2 IS NULL)
+        SELECT
+            number_of_views as "number_of_views!",
+            number_of_tables as "number_of_tables!",
+            created_at as "created_at!",
+            updated_at,
+            timestamp as "timestamp!"
+        FROM (
+            (SELECT number_of_views, number_of_tables, created_at, updated_at, timestamp
+            FROM warehouse_statistics
+            WHERE warehouse_id = $1
+            AND (timestamp < $2 OR $2 IS NULL))
+
+            UNION ALL
+
+            (SELECT number_of_views, number_of_tables, created_at, updated_at, timestamp
+            FROM warehouse_statistics_history
+            WHERE warehouse_id = $1
+            AND (timestamp < $2 OR $2 IS NULL))
+        ) AS ww
         ORDER BY timestamp DESC
         LIMIT $3
         "#,
@@ -927,6 +995,63 @@ pub(crate) mod test {
     }
 
     #[sqlx::test]
+    async fn test_cannot_drop_protected_warehouse(pool: sqlx::PgPool) {
+        let state = CatalogState::from_pools(pool.clone(), pool.clone());
+        let project_id = ProjectId::from(uuid::Uuid::new_v4());
+        let warehouse_id =
+            initialize_warehouse(state.clone(), None, Some(&project_id), None, true).await;
+        let mut trx = PostgresTransaction::begin_write(state.clone())
+            .await
+            .unwrap();
+        set_warehouse_protection(warehouse_id, true, trx.transaction())
+            .await
+            .unwrap();
+        let e = delete_warehouse(
+            warehouse_id,
+            DeleteWarehouseQuery { force: false },
+            trx.transaction(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(e.error.code, StatusCode::CONFLICT);
+        set_warehouse_protection(warehouse_id, false, trx.transaction())
+            .await
+            .unwrap();
+        delete_warehouse(
+            warehouse_id,
+            DeleteWarehouseQuery { force: false },
+            trx.transaction(),
+        )
+        .await
+        .unwrap();
+
+        trx.commit().await.unwrap();
+    }
+
+    #[sqlx::test]
+    async fn test_can_force_drop_protected_warehouse(pool: sqlx::PgPool) {
+        let state = CatalogState::from_pools(pool.clone(), pool.clone());
+        let project_id = ProjectId::from(uuid::Uuid::new_v4());
+        let warehouse_id =
+            initialize_warehouse(state.clone(), None, Some(&project_id), None, true).await;
+        let mut trx = PostgresTransaction::begin_write(state.clone())
+            .await
+            .unwrap();
+        set_warehouse_protection(warehouse_id, true, trx.transaction())
+            .await
+            .unwrap();
+        delete_warehouse(
+            warehouse_id,
+            DeleteWarehouseQuery { force: true },
+            trx.transaction(),
+        )
+        .await
+        .unwrap();
+
+        trx.commit().await.unwrap();
+    }
+
+    #[sqlx::test]
     async fn test_warehouse_statistics_pagination(pool: sqlx::PgPool) {
         let state = CatalogState::from_pools(pool.clone(), pool.clone());
         let project_id = ProjectId::from(uuid::Uuid::new_v4());
@@ -936,16 +1061,17 @@ pub(crate) mod test {
         let mut t = PostgresTransaction::begin_write(state.clone())
             .await
             .unwrap();
+
         for i in 0..10 {
             sqlx::query!(
                 r#"
-                INSERT INTO warehouse_statistics (number_of_views, number_of_tables, warehouse_id, timestamp)
+                INSERT INTO warehouse_statistics_history (number_of_views, number_of_tables, warehouse_id, timestamp)
                 VALUES ($1, $2, $3, $4)
                 "#,
                 i,
                 i,
                 warehouse_id.0,
-                chrono::Utc::now() + chrono::Duration::hours(i)
+                chrono::Utc::now() - chrono::Duration::hours(i)
             )
             .execute(&mut **t.transaction())
             .await
@@ -978,7 +1104,7 @@ pub(crate) mod test {
         .unwrap();
 
         assert_eq!(stats.stats.len(), 3);
-        assert!(dbg!(&stats.next_page_token).is_some());
+        assert!(stats.next_page_token.is_some());
 
         let stats = PostgresCatalog::get_warehouse_stats(
             warehouse_id,

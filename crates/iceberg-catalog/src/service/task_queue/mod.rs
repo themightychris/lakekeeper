@@ -59,6 +59,10 @@ impl TaskQueues {
         self.tabular_purge.enqueue(task).await
     }
 
+    /// Spawns the expiration and purge queues.
+    ///
+    /// # Errors
+    /// Fails if any of the queue handlers exit unexpectedly.
     pub async fn spawn_queues<C, S, A>(
         &self,
         catalog_state: C::State,
@@ -136,7 +140,10 @@ pub trait TaskQueue: Debug {
     fn config(&self) -> &TaskQueueConfig;
     fn queue_name(&self) -> &'static str;
 
-    async fn enqueue(&self, task: Self::Input) -> crate::api::Result<()>;
+    async fn enqueue_batch(&self, task: Vec<Self::Input>) -> crate::api::Result<()>;
+    async fn enqueue(&self, task: Self::Input) -> crate::api::Result<()> {
+        self.enqueue_batch(vec![task]).await
+    }
     async fn pick_new_task(&self) -> crate::api::Result<Option<Self::Task>>;
     async fn record_success(&self, id: Uuid) -> crate::api::Result<()>;
     async fn record_failure(&self, id: Uuid, error_details: &str) -> crate::api::Result<()>;
@@ -325,7 +332,7 @@ mod test {
         let mut trx = PostgresTransaction::begin_read(catalog_state.clone())
             .await
             .unwrap();
-        let (_, _) = <PostgresCatalog as Catalog>::list_tabulars(
+        let _ = <PostgresCatalog as Catalog>::list_tabulars(
             warehouse,
             None,
             ListFlags {
@@ -346,6 +353,7 @@ mod test {
             .unwrap();
         <PostgresCatalog as Catalog>::mark_tabular_as_deleted(
             tab.table_id.into(),
+            false,
             trx.transaction(),
         )
         .await
@@ -366,7 +374,7 @@ mod test {
             .await
             .unwrap();
 
-        let (_, del) = <PostgresCatalog as Catalog>::list_tabulars(
+        let del = <PostgresCatalog as Catalog>::list_tabulars(
             warehouse,
             None,
             ListFlags {
@@ -380,7 +388,8 @@ mod test {
         .await
         .unwrap()
         .remove(&tab.table_id.into())
-        .unwrap();
+        .unwrap()
+        .deletion_details;
         del.unwrap();
         trx.commit().await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(1250)).await;

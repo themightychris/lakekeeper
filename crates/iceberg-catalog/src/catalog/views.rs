@@ -30,7 +30,7 @@ use crate::{
 
 #[async_trait::async_trait]
 impl<C: Catalog, A: Authorizer + Clone, S: SecretStore>
-    crate::api::iceberg::v1::views::Service<State<A, C, S>> for CatalogServer<C, A, S>
+    crate::api::iceberg::v1::views::ViewService<State<A, C, S>> for CatalogServer<C, A, S>
 {
     /// List all view identifiers underneath a given namespace
     async fn list_views(
