@@ -474,17 +474,20 @@ LAKEKEEPER__ENABLE_GCP_SYSTEM_CREDENTIALS=true
 ```
 When using system identity, Lakekeeper will use the service account associated with the application or virtual machine to access Google Cloud Storage (GCS). Ensure that the service account has the necessary permissions, such as the Storage Admin role on the target bucket.
 
----
-title: "HDFS"
-description: "Configure Hadoop Distributed File System (HDFS) as a storage location for an Iceberg catalog"
-order: 5
----
 
 ## HDFS Storage
 
 HDFS Support in this Lakekeeper version is in Preview. Warehouse configuration may change in the future. Lakekeeper does not manage access for clients to HDFS Locations. If permissions in Lakekeeper are applied, they effect metadata only.
 
 Lakekeeper supports using Hadoop Distributed File System (HDFS) as a storage location for Iceberg tables. This integration is built on the [hdfs-native](https://crates.io/crates/hdfs-native) crate, which provides native Rust bindings to libhdfs3 for high-performance HDFS access without requiring a JVM.
+
+To enable HDFS support system-wide, set the following environment variabe:
+
+```bash
+LAKEKEEPER__ENABLE_HDFS_WITH_SYSTEM_CREDENTIALS=true
+```
+
+Lakekeeper will attempt to read Hadoop configs `core-site.xml` and `hdfs-site.xml` in the directories `$HADOOP_CONF_DIR` or if that doesn't exist, `$HADOOP_HOME/etc/hadoop`.
 
 To configure HDFS storage for a warehouse, use the following storage profile:
 
@@ -527,10 +530,12 @@ The full list of supported HDFS settings can be found in the [hdfs-native docume
 
 ### Kerberos Authentication
 
-Lakekeeper supports Kerberos authentication for secure HDFS clusters. To use Kerberos with HDFS:
+Lakekeeper supports Kerberos authentication for secure HDFS clusters. To use Kerberos, the system must be correctly configured with an identity that has permissions to access HDFS. Most importantly, the `KRB5CCNAME` environment variable should be set and point to a valid credential cache.
 
-1. Ensure Kerberos tickets are available in the Lakekeeper container
-2. Enable system credentials with the `LAKEKEEPER__ENABLE_HDFS_WITH_SYSTEM_CREDENTIALS` environment variable
-3. Configure the Kerberos settings in the HDFS profile
+In addition to setting `KRB5CCNAME`, ensure the following:
 
-A full example with Kerberos is available in the `examples` folder of the Lakekeeper GitHub repository.
+- **Keytab Files**: The system must have access to the appropriate keytab files for the Kerberos principal. These keytab files should be securely stored and mounted into the Lakekeeper environment.
+- **Kerberos Configuration**: The `krb5.conf` file must be correctly configured with the Kerberos realm and KDC (Key Distribution Center) details. This file should be accessible to the Lakekeeper process.
+- **Environment Variables**: Set the `KRB5_CONFIG` environment variable to point to the location of the `krb5.conf` file if it is not in the default location.
+- **HDFS Configuration**: Ensure that the HDFS configuration files (`core-site.xml` and `hdfs-site.xml`) are properly set up to enable Kerberos authentication. These files should include properties such as `hadoop.security.authentication` set to `kerberos` and the appropriate Kerberos principals for the NameNode.
+- **Ticket Renewal**: If long-running processes are expected, configure a mechanism to renew Kerberos tickets periodically to avoid authentication failures.

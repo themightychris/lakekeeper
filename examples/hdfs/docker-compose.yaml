@@ -41,7 +41,6 @@ services:
       - KRB5CCNAME=FILE:/tickets/krb5cc_0
       - KRB5_CONFIG=/etc/krb5.conf
       - HADOOP_CONF_DIR=/etc/hadoop
-      - KRB5_TRACE=/dev/stderr
       - RUST_LOG=debug,hdfs_native=trace
     command: [ "serve" ]
     healthcheck:
