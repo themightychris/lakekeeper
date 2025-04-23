@@ -30,7 +30,7 @@ services:
       - "8888:8888"
 
   server:
-    image: ${LAKEKEEPER_TEST__SERVER_IMAGE:-quay.io/lakekeeper/catalog:latest-main-hdfs}
+    image: ${LAKEKEEPER_TEST__SERVER_IMAGE:-quay.io/lakekeeper/catalog:v0.8.3-hdfs-preview}
     pull_policy: always
     environment:
       - LAKEKEEPER__PG_ENCRYPTION_KEY=This-is-NOT-Secure!
@@ -68,7 +68,7 @@ services:
       - "8181:8181"
 
   migrate:
-    image: ${LAKEKEEPER_TEST__SERVER_IMAGE:-quay.io/lakekeeper/catalog:latest-main-hdfs}
+    image: ${LAKEKEEPER_TEST__SERVER_IMAGE:-quay.io/lakekeeper/catalog:v0.8.3-hdfs-preview}
     pull_policy: always
     environment:
       - LAKEKEEPER__PG_ENCRYPTION_KEY=This-is-NOT-Secure!

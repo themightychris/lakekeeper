@@ -6,7 +6,7 @@ To run the example run the following commands:
 
 ```bash
 cd examples/hdfs
-docker compose up
+docker compose -f docker-compose.yaml up
 ```
 
 Now open your Browser:
