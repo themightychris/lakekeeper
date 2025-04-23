@@ -12,6 +12,8 @@ services:
         condition: service_healthy
       kerberos-permission-fixer:
         condition: service_started
+      bootstrap:
+        condition: service_completed_successfully
     command: start-notebook.sh --NotebookApp.token=''
     environment:
       - KRB5CCNAME=FILE:/tickets/krb5cc_0
