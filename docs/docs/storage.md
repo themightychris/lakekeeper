@@ -539,3 +539,5 @@ In addition to setting `KRB5CCNAME`, ensure the following:
 - **Environment Variables**: Set the `KRB5_CONFIG` environment variable to point to the location of the `krb5.conf` file if it is not in the default location.
 - **HDFS Configuration**: Ensure that the HDFS configuration files (`core-site.xml` and `hdfs-site.xml`) are properly set up to enable Kerberos authentication. These files should include properties such as `hadoop.security.authentication` set to `kerberos` and the appropriate Kerberos principals for the NameNode.
 - **Ticket Renewal**: If long-running processes are expected, configure a mechanism to renew Kerberos tickets periodically to avoid authentication failures.
+
+A complete example of Lakekeeper using HDFS with Kerberos is available in our examples.
