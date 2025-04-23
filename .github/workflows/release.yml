@@ -129,7 +129,7 @@ jobs:
 
       - name: Build [Cargo]
         if: matrix.docker-build == false && matrix.hdfs == false
-        run: cargo build --features "authz-openfga,nats,kafka" --release --locked --target ${{ matrix.target }}
+        run: cargo build --features "authz-openfga,nats,kafka,ui" --release --locked --target ${{ matrix.target }}
 
       - name: Build [Cargo - HDFS]
         if: matrix.docker-build == false && matrix.hdfs == true
@@ -151,7 +151,7 @@ jobs:
           docker run \
             -w /build --mount type=bind,src=$(pwd),target=/build \
             localhost/build-lakekeeper:latest \
-            cargo build --release --features "authz-openfga,nats,kafka" --locked --target ${{ matrix.target }}
+            cargo build --release --features "authz-openfga,nats,kafka,ui" --locked --target ${{ matrix.target }}
 
       - name: Build [Docker Build - HDFS]
         if: matrix.docker-build == true && matrix.hdfs == true
@@ -395,7 +395,7 @@ jobs:
       - release_please
       - test-docker
       - test-hdfs
-    if: ${{ needs.release_please.outputs.releases_created != 'true' }} && github.ref == 'refs/heads/main'
+    if: ${{ needs.release_please.outputs.releases_created != 'true' && github.ref == 'refs/heads/main' && github.event_name == 'push' }}
     steps:
       - name: Download Artifacts
         uses: actions/download-artifact@v4
