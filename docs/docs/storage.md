@@ -473,3 +473,64 @@ GCP system identities allow Lakekeeper to authenticate using the service account
 LAKEKEEPER__ENABLE_GCP_SYSTEM_CREDENTIALS=true
 ```
 When using system identity, Lakekeeper will use the service account associated with the application or virtual machine to access Google Cloud Storage (GCS). Ensure that the service account has the necessary permissions, such as the Storage Admin role on the target bucket.
+
+---
+title: "HDFS"
+description: "Configure Hadoop Distributed File System (HDFS) as a storage location for an Iceberg catalog"
+order: 5
+---
+
+## HDFS Storage
+
+HDFS Support in this Lakekeeper version is in Preview. Warehouse configuration may change in the future. Lakekeeper does not manage access for clients to HDFS Locations. If permissions in Lakekeeper are applied, they effect metadata only.
+
+Lakekeeper supports using Hadoop Distributed File System (HDFS) as a storage location for Iceberg tables. This integration is built on the [hdfs-native](https://crates.io/crates/hdfs-native) crate, which provides native Rust bindings to libhdfs3 for high-performance HDFS access without requiring a JVM.
+
+To configure HDFS storage for a warehouse, use the following storage profile:
+
+```json
+{
+  "storage-profile": {
+    "type": "hdfs",
+    "url": "hdfs://namenode:8020",
+    "key-prefix": "/path/in/hdfs"
+  }
+}
+```
+
+### Required Parameters
+
+| Parameter    | Description                                                   |
+|--------------|---------------------------------------------------------------|
+| `url`        | The HDFS namenode URL, typically in the format `hdfs://namenode:8020` |
+| `key-prefix` | Base path in HDFS where tables will be stored                 |
+
+### Optional Configuration
+
+HDFS connections can be further configured with additional parameters passed via the `config` field:
+
+```json
+{
+  "storage-profile": {
+    "type": "hdfs",
+    "url": "hdfs://namenode:8020",
+    "key-prefix": "/iceberg/warehouse",
+    "config": {
+      "dfs.client.read.shortcircuit": "true",
+      "dfs.domain.socket.path": "/var/lib/hadoop-hdfs/dn_socket"
+    }
+  }
+}
+```
+
+The full list of supported HDFS settings can be found in the [hdfs-native documentation](https://github.com/Kimahriman/hdfs-native?tab=readme-ov-file#supported-hdfs-settings).
+
+### Kerberos Authentication
+
+Lakekeeper supports Kerberos authentication for secure HDFS clusters. To use Kerberos with HDFS:
+
+1. Ensure Kerberos tickets are available in the Lakekeeper container
+2. Enable system credentials with the `LAKEKEEPER__ENABLE_HDFS_WITH_SYSTEM_CREDENTIALS` environment variable
+3. Configure the Kerberos settings in the HDFS profile
+
+A full example with Kerberos is available in the `examples` folder of the Lakekeeper GitHub repository.
