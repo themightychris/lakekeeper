@@ -1,5 +1,5 @@
-mod drop_warehouse;
 mod drop_recursive;
+mod drop_warehouse;
 mod endpoint_stats;
 mod stats;
 
