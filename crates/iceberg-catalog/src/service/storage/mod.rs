@@ -660,11 +660,13 @@ impl StorageLocations for StorageProfile {}
 impl StorageLocations for S3Profile {}
 impl StorageLocations for AdlsProfile {}
 
+#[cfg(test)]
 #[derive(Debug, Eq, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct TestProfile {
     base_location: Uuid,
 }
 
+#[cfg(test)]
 impl Default for TestProfile {
     fn default() -> Self {
         Self {

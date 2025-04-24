@@ -1,3 +1,4 @@
+mod drop_warehouse;
 mod drop_recursive;
 mod endpoint_stats;
 mod stats;
