@@ -1180,7 +1180,6 @@ mod tests {
 
     #[needs_env_var(TEST_AWS = 1)]
     #[tokio::test]
-    // #[tracing_test::traced_test]
     async fn test_validate_aws() {
         use super::s3::test::aws::get_storage_profile;
 
@@ -1188,7 +1187,11 @@ mod tests {
         let profile: StorageProfile = profile.into();
         let cred: StorageCredential = credential.into();
         profile
-            .validate_access(Some(&cred), None)
+            .validate_access(Some(&cred), None, StorageValidation::ReadWriteDelete)
+            .await
+            .expect("Failed to validate access");
+        profile
+            .validate_access(Some(&cred), None, StorageValidation::Read)
             .await
             .expect("Failed to validate access");
     }
