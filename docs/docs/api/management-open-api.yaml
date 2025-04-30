@@ -2522,6 +2522,9 @@ components:
           description: |-
             Project ID in which to create the warehouse.
             Deprecated: Please use the `x-project-id` header instead.
+        storage-access-validation-options:
+          $ref: '#/components/schemas/StorageValidation'
+          description: Options for the storage profile access validation.
         storage-credential:
           oneOf:
             - type: 'null'
@@ -4017,6 +4020,12 @@ components:
                     - gcs
           title: StorageProfileGcs
       description: Storage profile for a warehouse.
+    StorageValidation:
+      type: string
+      enum:
+        - read
+        - read-write-delete
+        - skip
     TableAction:
       type: string
       enum:
@@ -4365,6 +4374,8 @@ components:
               description: |-
                 New storage credential to use for the warehouse.
                 If not specified, the existing credential is removed.
+        storage-access-validation:
+          $ref: '#/components/schemas/StorageValidation'
     UpdateWarehouseDeleteProfileRequest:
       type: object
       required:
@@ -4377,6 +4388,9 @@ components:
       required:
         - storage-profile
       properties:
+        storage-access-validation-options:
+          $ref: '#/components/schemas/StorageValidation'
+          description: Options for the storage profile access validation.
         storage-credential:
           oneOf:
             - type: 'null'
