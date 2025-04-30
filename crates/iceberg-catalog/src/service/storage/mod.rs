@@ -1,5 +1,6 @@
 #![allow(clippy::match_wildcard_for_single_variants)]
 
+use futures::FutureExt;
 pub(crate) mod az;
 mod error;
 pub(crate) mod gcs;
@@ -17,6 +18,7 @@ use iceberg_ext::{
 };
 pub use s3::{S3Credential, S3Flavor, S3Location, S3Profile};
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use super::{secrets::SecretInStorage, NamespaceIdentUuid, TableIdentUuid};
@@ -80,6 +82,15 @@ pub enum StoragePermissions {
 pub struct TableConfig {
     pub(crate) creds: TableProperties,
     pub(crate) config: TableProperties,
+}
+
+#[derive(Debug, Deserialize, Serialize, ToSchema, Clone, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum StorageValidation {
+    Read,
+    #[default]
+    ReadWriteDelete,
+    Skip,
 }
 
 impl StorageProfile {
@@ -314,7 +325,13 @@ impl StorageProfile {
         &self,
         credential: Option<&StorageCredential>,
         location: Option<&Location>,
+        validate_options: StorageValidation,
     ) -> Result<(), ValidationError> {
+        if matches!(validate_options, StorageValidation::Skip) {
+            tracing::debug!("Skipping validation");
+            return Ok(());
+        }
+
         let file_io = self.file_io(credential).await?;
 
         let ns_id = NamespaceIdentUuid::default();
@@ -336,11 +353,23 @@ impl StorageProfile {
         };
 
         // Run both validations in parallel
-        let direct_validation = self.validate_read_write(&file_io, &test_location, false);
+        let direct_validation = if matches!(validate_options, StorageValidation::ReadWriteDelete) {
+            tracing::debug!("Validating read/write/delete access to {test_location}");
+            self.validate_read_write(&file_io, &test_location, false)
+                .boxed()
+        } else {
+            tracing::debug!("Validating read access to {test_location}");
+            self.validate_read(&file_io, &test_location).boxed()
+        };
+
         let vended_validation = async {
             if test_vended_credentials {
-                self.validate_vended_credentials_access(credential, &test_location)
-                    .await?;
+                self.validate_vended_credentials_access(
+                    credential,
+                    &test_location,
+                    validate_options,
+                )
+                .await?;
             }
             Ok::<(), ValidationError>(())
         };
@@ -397,9 +426,8 @@ impl StorageProfile {
         &self,
         credential: Option<&StorageCredential>,
         test_location: &Location,
+        validate_options: StorageValidation,
     ) -> Result<(), ValidationError> {
-        tracing::debug!("Validating vended credentials access to: {test_location}");
-
         let tbl_config = self
             .generate_table_config(
                 DataAccess {
@@ -412,36 +440,51 @@ impl StorageProfile {
             )
             .await?;
 
-        match &self {
+        let file_io = match &self {
             StorageProfile::S3(_) => {
                 tracing::debug!("Getting s3 file io from table config for vended credentials.");
-                let sts_file_io = s3::get_file_io_from_table_config(&tbl_config.config)?;
-                tracing::debug!(
-                    "Validating read/write access to: {test_location} using vended credentials"
-                );
-                self.validate_read_write(&sts_file_io, test_location, true)
-                    .await?;
+                s3::get_file_io_from_table_config(&tbl_config.config)?
             }
             StorageProfile::Adls(p) => {
                 tracing::debug!("Validating adls vended credentials access to: {test_location}");
-                let sts_file_io = az::get_file_io_from_table_config(
-                    &tbl_config.config,
-                    p.filesystem.to_string(),
-                )?;
-                self.validate_read_write(&sts_file_io, test_location, true)
-                    .await?;
+                az::get_file_io_from_table_config(&tbl_config.config, p.filesystem.to_string())?
             }
             #[cfg(test)]
-            StorageProfile::Test(_) => {}
+            StorageProfile::Test(_) => return Ok(()),
             StorageProfile::Gcs(_) => {
                 tracing::debug!("Getting gcs file io from table config for vended credentials.");
-                let sts_file_io = gcs::get_file_io_from_table_config(&tbl_config.config)?;
-                tracing::debug!("Validating gcs vended credentials access to: {test_location}");
-                self.validate_read_write(&sts_file_io, test_location, true)
-                    .await?;
+                gcs::get_file_io_from_table_config(&tbl_config.config)?
             }
+        };
+        tracing::debug!(
+            "Validating read/write access to: {test_location} using vended credentials"
+        );
+        if matches!(validate_options, StorageValidation::Read) {
+            self.validate_read(&file_io, test_location).await?;
+        } else if matches!(validate_options, StorageValidation::ReadWriteDelete) {
+            self.validate_read_write(&file_io, test_location, true)
+                .await?;
         }
+        Ok(())
+    }
 
+    async fn validate_read(
+        &self,
+        file_io: &iceberg::io::FileIO,
+        test_location: &Location,
+    ) -> Result<(), ValidationError> {
+        tracing::debug!("Validating read access to : {test_location}");
+        let mut it = list_location(file_io, test_location, Some(1))
+            .await
+            .map_err(|e| {
+                tracing::error!("Error while listing location: {e:?}");
+                ValidationError::IoOperationFailed(e, Box::new(self.clone()))
+            })?;
+        let _ = it.next().await.transpose().map_err(|e| {
+            tracing::error!("Error while listing location: {e:?}");
+            ValidationError::IoOperationFailed(e, Box::new(self.clone()))
+        })?;
+        tracing::debug!("Successfully read from location: {test_location}");
         Ok(())
     }
 
@@ -476,7 +519,6 @@ impl StorageProfile {
             test_file_write.pop().push("test");
             tracing::debug!("Validating access to: {}", test_file_write);
         }
-
         // Test write
         crate::catalog::io::write_metadata_file(
             &test_file_write,

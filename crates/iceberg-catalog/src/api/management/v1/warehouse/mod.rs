@@ -30,6 +30,7 @@ use crate::{
         authz::{Authorizer, CatalogProjectAction, CatalogWarehouseAction},
         event_publisher::EventMetadata,
         secrets::SecretStore,
+        storage::StorageValidation,
         task_queue::TaskFilter,
         Catalog, ListFlags, NamespaceIdentUuid, State, TableIdentUuid, TabularIdentUuid,
         Transaction,
@@ -78,6 +79,9 @@ pub struct CreateWarehouseRequest {
     pub project_id: Option<ProjectId>,
     /// Storage profile to use for the warehouse.
     pub storage_profile: StorageProfile,
+    /// Options for the storage profile access validation.
+    #[serde(default)]
+    pub storage_access_validation_options: StorageValidation,
     /// Optional storage credential to use for the warehouse.
     pub storage_credential: Option<StorageCredential>,
     /// Profile to determine behavior upon dropping of tabulars, defaults to soft-deletion with
@@ -156,6 +160,9 @@ pub struct UpdateWarehouseStorageRequest {
     /// provided, we assume that this storage does not require credentials.
     #[serde(default)]
     pub storage_credential: Option<StorageCredential>,
+    /// Options for the storage profile access validation.
+    #[serde(default)]
+    pub storage_access_validation_options: StorageValidation,
 }
 
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
@@ -227,6 +234,8 @@ pub struct UpdateWarehouseCredentialRequest {
     /// New storage credential to use for the warehouse.
     /// If not specified, the existing credential is removed.
     pub new_storage_credential: Option<StorageCredential>,
+    #[serde(default)]
+    pub storage_access_validation: StorageValidation,
 }
 
 impl axum::response::IntoResponse for CreateWarehouseResponse {
@@ -283,6 +292,7 @@ pub trait Service<C: Catalog, A: Authorizer, S: SecretStore> {
             warehouse_name,
             project_id,
             mut storage_profile,
+            storage_access_validation_options,
             storage_credential,
             delete_profile,
         } = request;
@@ -310,7 +320,11 @@ pub trait Service<C: Catalog, A: Authorizer, S: SecretStore> {
         storage_profile.normalize(storage_credential.as_ref())?;
 
         // Run validation and overlap check in parallel
-        let validation_future = storage_profile.validate_access(storage_credential.as_ref(), None);
+        let validation_future = storage_profile.validate_access(
+            storage_credential.as_ref(),
+            None,
+            storage_access_validation_options,
+        );
         let overlap_check_future = async {
             let mut transaction =
                 C::Transaction::begin_read(context.v1_state.catalog.clone()).await?;
@@ -657,11 +671,16 @@ pub trait Service<C: Catalog, A: Authorizer, S: SecretStore> {
         let UpdateWarehouseStorageRequest {
             mut storage_profile,
             storage_credential,
+            storage_access_validation_options,
         } = request;
 
         storage_profile.normalize(storage_credential.as_ref())?;
         storage_profile
-            .validate_access(storage_credential.as_ref(), None)
+            .validate_access(
+                storage_credential.as_ref(),
+                None,
+                storage_access_validation_options,
+            )
             .await?;
 
         let mut transaction = C::Transaction::begin_write(context.v1_state.catalog).await?;
@@ -726,6 +745,7 @@ pub trait Service<C: Catalog, A: Authorizer, S: SecretStore> {
         // ------------------- Business Logic -------------------
         let UpdateWarehouseCredentialRequest {
             new_storage_credential,
+            storage_access_validation: storage_access_validation_options,
         } = request;
 
         let mut transaction = C::Transaction::begin_write(context.v1_state.catalog).await?;
@@ -734,7 +754,11 @@ pub trait Service<C: Catalog, A: Authorizer, S: SecretStore> {
         let storage_profile = warehouse.storage_profile;
 
         storage_profile
-            .validate_access(new_storage_credential.as_ref(), None)
+            .validate_access(
+                new_storage_credential.as_ref(),
+                None,
+                storage_access_validation_options,
+            )
             .await?;
 
         let secret_id = if let Some(new_storage_credential) = new_storage_credential {
@@ -1082,11 +1106,11 @@ mod test {
         ApiContext<State<HidingAuthorizer, PostgresCatalog, SecretsState>>,
         WarehouseIdent,
     ) {
-        let prof = crate::catalog::test::test_io_profile();
+        let prof = crate::tests::test_io_profile();
 
         let authz = HidingAuthorizer::new();
 
-        let (ctx, warehouse) = crate::catalog::test::setup(
+        let (ctx, warehouse) = crate::tests::setup(
             pool.clone(),
             prof,
             None,
@@ -1095,14 +1119,14 @@ mod test {
                 expiration_seconds: chrono::Duration::seconds(10),
             },
             Some(UserId::new_unchecked("oidc", "test-user-id")),
+            None,
+            1,
         )
         .await;
-        let ns = crate::catalog::test::create_ns(
-            ctx.clone(),
-            warehouse.warehouse_id.to_string(),
-            "ns1".to_string(),
-        )
-        .await;
+        let api_context = ctx.clone();
+        let prefix = warehouse.warehouse_id.to_string();
+        let ns_name = "ns1".to_string();
+        let ns = crate::tests::create_ns(api_context, prefix, ns_name).await;
         let ns_params = NamespaceParameters {
             prefix: Some(Prefix(warehouse.warehouse_id.to_string())),
             namespace: ns.namespace.clone(),
@@ -1164,11 +1188,11 @@ mod test {
 
     #[sqlx::test]
     async fn test_deleted_tabulars_pagination(pool: sqlx::PgPool) {
-        let prof = crate::catalog::test::test_io_profile();
+        let prof = crate::tests::test_io_profile();
 
         let authz = HidingAuthorizer::new();
 
-        let (ctx, warehouse) = crate::catalog::test::setup(
+        let (ctx, warehouse) = crate::tests::setup(
             pool.clone(),
             prof,
             None,
@@ -1177,14 +1201,14 @@ mod test {
                 expiration_seconds: chrono::Duration::seconds(10),
             },
             Some(UserId::new_unchecked("oidc", "test-user-id")),
+            None,
+            1,
         )
         .await;
-        let ns = crate::catalog::test::create_ns(
-            ctx.clone(),
-            warehouse.warehouse_id.to_string(),
-            "ns1".to_string(),
-        )
-        .await;
+        let api_context = ctx.clone();
+        let prefix = warehouse.warehouse_id.to_string();
+        let ns_name = "ns1".to_string();
+        let ns = crate::tests::create_ns(api_context, prefix, ns_name).await;
         let ns_params = NamespaceParameters {
             prefix: Some(Prefix(warehouse.warehouse_id.to_string())),
             namespace: ns.namespace.clone(),
