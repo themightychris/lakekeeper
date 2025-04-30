@@ -87,9 +87,12 @@ pub struct TableConfig {
 #[derive(Debug, Deserialize, Serialize, ToSchema, Clone, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum StorageValidation {
+    /// Perform read-only validation checks.
     Read,
+    /// Perform full validation checks, including read, write, and delete operations.
     #[default]
     ReadWriteDelete,
+    /// Skip validation checks entirely.
     Skip,
 }
 
