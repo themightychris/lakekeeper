@@ -356,13 +356,17 @@ impl StorageProfile {
         };
 
         // Run both validations in parallel
-        let direct_validation = if matches!(validate_options, StorageValidation::ReadWriteDelete) {
-            tracing::debug!("Validating read/write/delete access to {test_location}");
-            self.validate_read_write(&file_io, &test_location, false)
-                .boxed()
-        } else {
-            tracing::debug!("Validating read access to {test_location}");
-            self.validate_read(&file_io, &test_location).boxed()
+        let direct_validation = match validate_options {
+            StorageValidation::Read => {
+                tracing::debug!("Validating read access to {test_location}");
+                self.validate_read(&file_io, &test_location).boxed()
+            }
+            StorageValidation::ReadWriteDelete => {
+                tracing::debug!("Validating read/write/delete access to {test_location}");
+                self.validate_read_write(&file_io, &test_location, false)
+                    .boxed()
+            }
+            StorageValidation::Skip => async { Ok(()) }.boxed(),
         };
 
         let vended_validation = async {
@@ -462,12 +466,17 @@ impl StorageProfile {
         tracing::debug!(
             "Validating read/write access to: {test_location} using vended credentials"
         );
-        if matches!(validate_options, StorageValidation::Read) {
-            self.validate_read(&file_io, test_location).await?;
-        } else if matches!(validate_options, StorageValidation::ReadWriteDelete) {
-            self.validate_read_write(&file_io, test_location, true)
-                .await?;
+        match validate_options {
+            StorageValidation::Read => {
+                self.validate_read(&file_io, test_location).await?;
+            }
+            StorageValidation::ReadWriteDelete => {
+                self.validate_read_write(&file_io, test_location, true)
+                    .await?;
+            }
+            StorageValidation::Skip => {}
         }
+
         Ok(())
     }
 
@@ -1197,6 +1206,41 @@ mod tests {
             .validate_access(Some(&cred), None, StorageValidation::Read)
             .await
             .expect("Failed to validate access");
+    }
+
+    #[tokio::test]
+    async fn test_storage_validation_skip_works_with_bogus_s3_profile() {
+        let profile = S3Profile {
+            bucket: "i-do-not-exist".to_string(),
+            key_prefix: Some(uuid::Uuid::now_v7().to_string()),
+            assume_role_arn: None,
+            endpoint: Some("http://localhost/i-do-not-exist".parse().unwrap()),
+            region: "i-do-not-exist".to_string(),
+            path_style_access: Some(false),
+            sts_role_arn: None,
+            flavor: S3Flavor::Aws,
+            sts_enabled: true,
+            allow_alternative_protocols: Some(false),
+            remote_signing_url_style: crate::service::storage::s3::S3UrlStyleDetectionMode::Auto,
+            sts_token_validity_seconds: 3600,
+            push_s3_delete_disabled: false,
+            aws_kms_key_arn: None,
+        };
+
+        let profile = StorageProfile::from(profile);
+
+        profile
+            .validate_access(None, None, StorageValidation::ReadWriteDelete)
+            .await
+            .expect_err("Should fail to validate access");
+        profile
+            .validate_access(None, None, StorageValidation::Read)
+            .await
+            .expect_err("Should fail to validate access");
+        profile
+            .validate_access(None, None, StorageValidation::Skip)
+            .await
+            .expect("Should be able to create a bogus profile with skip.");
     }
 
     #[needs_env_var::needs_env_var(TEST_MINIO = 1)]
