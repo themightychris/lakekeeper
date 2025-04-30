@@ -568,7 +568,7 @@ pub(crate) mod test {
     pub(crate) mod gcs_hns_tests {
         use crate::service::storage::{
             gcs::{GcsCredential, GcsProfile, GcsServiceKey},
-            StorageCredential, StorageProfile,
+            StorageCredential, StorageProfile, StorageValidation,
         };
 
         pub(crate) fn get_storage_profile() -> (GcsProfile, GcsCredential) {

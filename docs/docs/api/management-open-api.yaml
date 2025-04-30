@@ -2522,7 +2522,7 @@ components:
           description: |-
             Project ID in which to create the warehouse.
             Deprecated: Please use the `x-project-id` header instead.
-        storage-access-validation-options:
+        storage-access-validation:
           $ref: '#/components/schemas/StorageValidation'
           description: Options for the storage profile access validation.
         storage-credential:
@@ -4388,7 +4388,7 @@ components:
       required:
         - storage-profile
       properties:
-        storage-access-validation-options:
+        storage-access-validation:
           $ref: '#/components/schemas/StorageValidation'
           description: Options for the storage profile access validation.
         storage-credential:

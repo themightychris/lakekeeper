@@ -81,7 +81,7 @@ pub struct CreateWarehouseRequest {
     pub storage_profile: StorageProfile,
     /// Options for the storage profile access validation.
     #[serde(default)]
-    pub storage_access_validation_options: StorageValidation,
+    pub storage_access_validation: StorageValidation,
     /// Optional storage credential to use for the warehouse.
     pub storage_credential: Option<StorageCredential>,
     /// Profile to determine behavior upon dropping of tabulars, defaults to soft-deletion with
@@ -162,7 +162,7 @@ pub struct UpdateWarehouseStorageRequest {
     pub storage_credential: Option<StorageCredential>,
     /// Options for the storage profile access validation.
     #[serde(default)]
-    pub storage_access_validation_options: StorageValidation,
+    pub storage_access_validation: StorageValidation,
 }
 
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
@@ -292,7 +292,7 @@ pub trait Service<C: Catalog, A: Authorizer, S: SecretStore> {
             warehouse_name,
             project_id,
             mut storage_profile,
-            storage_access_validation_options,
+            storage_access_validation,
             storage_credential,
             delete_profile,
         } = request;
@@ -323,7 +323,7 @@ pub trait Service<C: Catalog, A: Authorizer, S: SecretStore> {
         let validation_future = storage_profile.validate_access(
             storage_credential.as_ref(),
             None,
-            storage_access_validation_options,
+            storage_access_validation,
         );
         let overlap_check_future = async {
             let mut transaction =
@@ -671,16 +671,12 @@ pub trait Service<C: Catalog, A: Authorizer, S: SecretStore> {
         let UpdateWarehouseStorageRequest {
             mut storage_profile,
             storage_credential,
-            storage_access_validation_options,
+            storage_access_validation,
         } = request;
 
         storage_profile.normalize(storage_credential.as_ref())?;
         storage_profile
-            .validate_access(
-                storage_credential.as_ref(),
-                None,
-                storage_access_validation_options,
-            )
+            .validate_access(storage_credential.as_ref(), None, storage_access_validation)
             .await?;
 
         let mut transaction = C::Transaction::begin_write(context.v1_state.catalog).await?;
@@ -745,7 +741,7 @@ pub trait Service<C: Catalog, A: Authorizer, S: SecretStore> {
         // ------------------- Business Logic -------------------
         let UpdateWarehouseCredentialRequest {
             new_storage_credential,
-            storage_access_validation: storage_access_validation_options,
+            storage_access_validation,
         } = request;
 
         let mut transaction = C::Transaction::begin_write(context.v1_state.catalog).await?;
@@ -757,7 +753,7 @@ pub trait Service<C: Catalog, A: Authorizer, S: SecretStore> {
             .validate_access(
                 new_storage_credential.as_ref(),
                 None,
-                storage_access_validation_options,
+                storage_access_validation,
             )
             .await?;
 
