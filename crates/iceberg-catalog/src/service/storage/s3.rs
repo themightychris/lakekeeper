@@ -1652,6 +1652,10 @@ pub(crate) mod test {
             LazyLock::new(|| std::env::var("LAKEKEEPER_TEST__S3_SECRET_KEY").unwrap());
         static TEST_ENDPOINT: LazyLock<String> =
             LazyLock::new(|| std::env::var("LAKEKEEPER_TEST__S3_ENDPOINT").unwrap());
+        static READ_ONLY_USER: LazyLock<String> =
+            LazyLock::new(|| std::env::var("LAKEKEEPER_TEST__S3_READ_ONLY_USER").unwrap());
+        static READ_ONLY_PASSWORD: LazyLock<String> =
+            LazyLock::new(|| std::env::var("LAKEKEEPER_TEST__S3_READ_ONLY_PASSWORD").unwrap());
 
         pub(crate) fn storage_profile(prefix: &str) -> (S3Profile, S3Credential) {
             let profile = S3Profile {
@@ -1691,6 +1695,14 @@ pub(crate) mod test {
                     let key_prefix = format!("test_prefix-{}", uuid::Uuid::now_v7());
                     let (profile, cred) = storage_profile(&key_prefix);
                     let mut profile: StorageProfile = profile.into();
+                    let readonly_cred: StorageCredential =
+                        S3Credential::AccessKey(S3AccessKeyCredential {
+                            aws_access_key_id: READ_ONLY_USER.clone(),
+                            aws_secret_access_key: READ_ONLY_PASSWORD.clone(),
+                            external_id: None,
+                        })
+                        .into();
+
                     let cred: StorageCredential = cred.into();
 
                     profile.normalize(Some(&cred)).unwrap();
@@ -1698,8 +1710,9 @@ pub(crate) mod test {
                         .validate_access(Some(&cred), None, StorageValidation::ReadWriteDelete)
                         .await
                         .unwrap();
+
                     profile
-                        .validate_access(Some(&cred), None, StorageValidation::Read)
+                        .validate_access(Some(&readonly_cred), None, StorageValidation::Read)
                         .await
                         .unwrap();
                 },
