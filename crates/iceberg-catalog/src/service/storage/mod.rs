@@ -7,6 +7,8 @@ pub(crate) mod gcs;
 pub(crate) mod hdfs;
 pub(crate) mod s3;
 
+use std::sync::Arc;
+
 pub use az::{AdlsLocation, AdlsProfile, AzCredential};
 pub(crate) use error::ValidationError;
 use error::{ConversionError, CredentialsError, FileIoError, TableConfigError, UpdateError};
@@ -186,7 +188,7 @@ impl StorageProfile {
             #[cfg(feature = "hdfs")]
             StorageProfile::Hdfs(prof) => Ok(prof
                 .file_io(secret.map(|s| s.try_into_hdfs()).transpose()?)
-                .map(LakekeeperFileIO::HdfsNative)?),
+                .map(|client| LakekeeperFileIO::HdfsNative(Arc::new(client)))?),
         }
     }
 
@@ -387,7 +389,7 @@ impl StorageProfile {
         tracing::debug!("Cleanup started");
         // Cleanup
         file_io
-            .remove_all(&test_location)
+            .remove_all(&ns_location)
             .await
             .map_err(|e| ValidationError::IoOperationFailed(e, Box::new(self.clone())))?;
 
