@@ -32,6 +32,7 @@ pub mod v1 {
     };
     use serde::{Deserialize, Serialize};
     use table::TableManagementService as _;
+    use typed_builder::TypedBuilder;
     use user::{
         CreateUserRequest, SearchUserRequest, SearchUserResponse, Service as _, UpdateUserRequest,
         User,
@@ -823,12 +824,13 @@ pub mod v1 {
         ApiServer::<C, A, S>::get_warehouse(warehouse_id.into(), api_context, metadata).await
     }
 
-    #[derive(Debug, Deserialize, utoipa::IntoParams)]
+    #[derive(Debug, Deserialize, utoipa::IntoParams, TypedBuilder)]
     pub struct DeleteWarehouseQuery {
         #[serde(
             deserialize_with = "crate::api::iceberg::types::deserialize_bool",
             default
         )]
+        #[builder(setter(strip_bool))]
         pub(crate) force: bool,
     }
 
@@ -1498,7 +1500,9 @@ pub mod v1 {
         View,
     }
 
-    #[derive(Debug, Serialize, utoipa::ToSchema, Clone, Copy, PartialEq, Eq)]
+    #[derive(
+        Debug, Serialize, utoipa::ToSchema, Clone, Copy, PartialEq, Eq, strum_macros::Display,
+    )]
     #[serde(rename_all = "kebab-case")]
     pub enum DeleteKind {
         Default,
