@@ -536,11 +536,7 @@ pub(crate) mod test {
                 .normalize(Some(&cred))
                 .expect("Failed to normalize profile");
             profile
-                .validate_access(Some(&cred), None, StorageValidation::ReadWriteDelete)
-                .await
-                .unwrap();
-            profile
-                .validate_access(Some(&cred), None, StorageValidation::Read)
+                .validate_access(Some(&cred), None, StorageValidation::ReadWriteDelete {})
                 .await
                 .unwrap();
         }
@@ -554,7 +550,11 @@ pub(crate) mod test {
             let credential = GcsCredential::GcpSystemIdentity {};
             let credential: StorageCredential = credential.into();
             profile
-                .validate_access(Some(&credential), None, StorageValidation::ReadWriteDelete)
+                .validate_access(
+                    Some(&credential),
+                    None,
+                    StorageValidation::ReadWriteDelete {},
+                )
                 .await
                 .unwrap_or_else(|e| panic!("Failed to validate system identity due to '{e:?}'"));
             profile
@@ -597,11 +597,7 @@ pub(crate) mod test {
                 .normalize(Some(&cred))
                 .expect("Failed to normalize profile");
             profile
-                .validate_access(Some(&cred), None, StorageValidation::ReadWriteDelete)
-                .await
-                .unwrap();
-            profile
-                .validate_access(Some(&cred), None, StorageValidation::Read)
+                .validate_access(Some(&cred), None, StorageValidation::ReadWriteDelete {})
                 .await
                 .unwrap();
         }

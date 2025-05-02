@@ -50,7 +50,7 @@ async fn test_cannot_drop_warehouse_before_purge_tasks_completed(pool: PgPool) {
         CreateWarehouseRequest::builder()
             .warehouse_name(warehouse_name.clone())
             .storage_profile(storage_profile)
-            .storage_access_validation(StorageValidation::ReadWriteDelete)
+            .storage_access_validation(StorageValidation::ReadWriteDelete {})
             .build(),
         api_context.clone(),
         random_request_metadata(),

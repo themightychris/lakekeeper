@@ -1633,7 +1633,7 @@ pub(crate) mod test {
         assert_eq!(location.to_string(), expected);
     }
 
-    #[needs_env_var(TEST_MINIO = 1)]
+    // #[needs_env_var(TEST_MINIO = 1)]
     pub(crate) mod s3_compat {
         use std::sync::LazyLock;
 
@@ -1707,12 +1707,29 @@ pub(crate) mod test {
 
                     profile.normalize(Some(&cred)).unwrap();
                     profile
-                        .validate_access(Some(&cred), None, StorageValidation::ReadWriteDelete)
+                        .validate_access(Some(&cred), None, StorageValidation::ReadWriteDelete {})
                         .await
                         .unwrap();
+                    let fio = profile.file_io(Some(&cred)).await.unwrap();
+                    let of = fio
+                        .new_output(
+                            profile
+                                .base_location()
+                                .unwrap()
+                                .cloning_push("read_this.txt")
+                                .as_str(),
+                        )
+                        .unwrap();
+                    of.write(b"hello world".as_slice().into()).await.unwrap();
 
                     profile
-                        .validate_access(Some(&readonly_cred), None, StorageValidation::Read)
+                        .validate_access(
+                            Some(&readonly_cred),
+                            None,
+                            StorageValidation::Read {
+                                path: "read_this.txt".to_string(),
+                            },
+                        )
                         .await
                         .unwrap();
                 },
@@ -1767,11 +1784,7 @@ pub(crate) mod test {
 
                     profile.normalize(Some(&cred)).unwrap();
                     profile
-                        .validate_access(Some(&cred), None, StorageValidation::ReadWriteDelete)
-                        .await
-                        .unwrap();
-                    profile
-                        .validate_access(Some(&cred), None, StorageValidation::Read)
+                        .validate_access(Some(&cred), None, StorageValidation::ReadWriteDelete {})
                         .await
                         .unwrap();
                 },
@@ -1826,11 +1839,7 @@ pub(crate) mod test {
 
                     profile.normalize(Some(&cred)).unwrap();
                     profile
-                        .validate_access(Some(&cred), None, StorageValidation::ReadWriteDelete)
-                        .await
-                        .unwrap();
-                    profile
-                        .validate_access(Some(&cred), None, StorageValidation::Read)
+                        .validate_access(Some(&cred), None, StorageValidation::ReadWriteDelete {})
                         .await
                         .unwrap();
                 },
@@ -1891,11 +1900,7 @@ pub(crate) mod test {
 
                     profile.normalize(Some(&cred)).unwrap();
                     profile
-                        .validate_access(Some(&cred), None, StorageValidation::ReadWriteDelete)
-                        .await
-                        .unwrap();
-                    profile
-                        .validate_access(Some(&cred), None, StorageValidation::Read)
+                        .validate_access(Some(&cred), None, StorageValidation::ReadWriteDelete {})
                         .await
                         .unwrap();
                 },

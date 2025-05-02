@@ -1037,10 +1037,7 @@ pub(crate) mod test {
                 prof.normalize(Some(&cred.clone().into()))
                     .expect("failed to validate profile");
                 let cred: StorageCredential = cred.into();
-                prof.validate_access(Some(&cred), None, StorageValidation::ReadWriteDelete)
-                    .await
-                    .unwrap_or_else(|e| panic!("Failed to validate '{typ}' due to '{e:?}'"));
-                prof.validate_access(Some(&cred), None, StorageValidation::Read)
+                prof.validate_access(Some(&cred), None, StorageValidation::ReadWriteDelete {})
                     .await
                     .unwrap_or_else(|e| panic!("Failed to validate '{typ}' due to '{e:?}'"));
             }

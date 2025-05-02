@@ -4021,11 +4021,45 @@ components:
           title: StorageProfileGcs
       description: Storage profile for a warehouse.
     StorageValidation:
-      type: string
-      enum:
-        - read
-        - read-write-delete
-        - skip
+      oneOf:
+        - type: object
+          description: Perform read-only validation checks.
+          required:
+            - read
+          properties:
+            read:
+              type: object
+              description: Perform read-only validation checks.
+              required:
+                - path
+              properties:
+                path:
+                  type: string
+                  description: |-
+                    A path within the given storage profile pointing at a file that can be used to verify read
+                    access.
+
+                    This does NOT include any s3://, wasb://, hdfs://, etc. prefix.
+                    This does NOT include any `key_prefix`
+
+                    The path that will be checked is the concatenation of any potential `key_prefix` in the
+                    provided profile and this path.
+        - type: object
+          description: Perform full validation checks, including read, write, and delete operations.
+          required:
+            - read-write-delete
+          properties:
+            read-write-delete:
+              type: object
+              description: Perform full validation checks, including read, write, and delete operations.
+        - type: object
+          description: Skip validation checks entirely.
+          required:
+            - skip
+          properties:
+            skip:
+              type: object
+              description: Skip validation checks entirely.
     TableAction:
       type: string
       enum:

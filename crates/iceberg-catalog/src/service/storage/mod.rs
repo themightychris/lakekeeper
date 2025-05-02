@@ -25,7 +25,10 @@ use crate::{
     api::{
         iceberg::v1::DataAccess, management::v1::warehouse::TabularDeleteProfile, CatalogConfig,
     },
-    catalog::{compression_codec::CompressionCodec, io::list_location},
+    catalog::{
+        compression_codec::CompressionCodec,
+        io::{list_location, IoError},
+    },
     request_metadata::RequestMetadata,
     retry::retry_fn,
     service::tabular_idents::TabularIdentUuid,
@@ -83,16 +86,31 @@ pub struct TableConfig {
     pub(crate) config: TableProperties,
 }
 
-#[derive(Debug, Deserialize, Serialize, ToSchema, Clone, Default)]
+#[derive(Debug, Deserialize, Serialize, ToSchema, Clone)]
 #[serde(rename_all = "kebab-case")]
 pub enum StorageValidation {
     /// Perform read-only validation checks.
-    Read,
+    Read {
+        /// A path within the given storage profile pointing at a file that can be used to verify read
+        /// access.
+        ///
+        /// This does NOT include any s3://, wasb://, hdfs://, etc. prefix.
+        /// This does NOT include any `key_prefix`
+        ///
+        /// The path that will be checked is the concatenation of any potential `key_prefix` in the
+        /// provided profile and this path.
+        path: String,
+    },
     /// Perform full validation checks, including read, write, and delete operations.
-    #[default]
-    ReadWriteDelete,
+    ReadWriteDelete {},
     /// Skip validation checks entirely.
-    Skip,
+    Skip {},
+}
+
+impl Default for StorageValidation {
+    fn default() -> Self {
+        StorageValidation::ReadWriteDelete {}
+    }
 }
 
 impl StorageProfile {
@@ -329,7 +347,7 @@ impl StorageProfile {
         location: Option<&Location>,
         validate_options: StorageValidation,
     ) -> Result<(), ValidationError> {
-        if matches!(validate_options, StorageValidation::Skip) {
+        if matches!(validate_options, StorageValidation::Skip {}) {
             tracing::debug!("Skipping validation");
             return Ok(());
         }
@@ -355,17 +373,17 @@ impl StorageProfile {
         };
 
         // Run both validations in parallel
-        let direct_validation = match validate_options {
-            StorageValidation::Read => {
-                tracing::debug!("Validating read access to {test_location}");
-                self.validate_read(&file_io, &test_location).boxed()
+        let direct_validation = match &validate_options {
+            StorageValidation::Read { path } => {
+                let location = self.base_location()?.cloning_push(path.as_str());
+                self.validate_read(&file_io, location.to_string()).boxed()
             }
-            StorageValidation::ReadWriteDelete => {
+            StorageValidation::ReadWriteDelete {} => {
                 tracing::debug!("Validating read/write/delete access to {test_location}");
                 self.validate_read_write(&file_io, &test_location, false)
                     .boxed()
             }
-            StorageValidation::Skip => async { Ok(()) }.boxed(),
+            StorageValidation::Skip {} => async { Ok(()) }.boxed(),
         };
 
         let vended_validation = async {
@@ -373,7 +391,7 @@ impl StorageProfile {
                 self.validate_vended_credentials_access(
                     credential,
                     &test_location,
-                    validate_options,
+                    validate_options.clone(),
                 )
                 .await?;
             }
@@ -385,42 +403,44 @@ impl StorageProfile {
         direct_result?;
         vended_result?;
 
-        tracing::debug!("Cleanup started");
         // Cleanup
-        crate::catalog::io::remove_all(&file_io, &test_location)
-            .await
-            .map_err(|e| ValidationError::IoOperationFailed(e, Box::new(self.clone())))?;
-
-        tracing::debug!("Cleanup finished");
-        retry_fn(|| async {
-            match check_location_is_empty(&file_io, &test_location, self, || {
-                ValidationError::InvalidLocation {
-                    reason: "Files are left after remove_all on test location".to_string(),
-                    source: None,
-                    location: test_location.to_string(),
-                    storage_type: self.storage_type(),
-                }
-            })
-            .await
-            {
-                Err(e @ ValidationError::IoOperationFailed(_, _)) => {
-                    tracing::warn!(
+        if matches!(validate_options, StorageValidation::ReadWriteDelete {}) {
+            tracing::debug!("Cleanup started");
+            crate::catalog::io::remove_all(&file_io, &test_location)
+                .await
+                .map_err(|e| ValidationError::IoOperationFailed(e, Box::new(self.clone())))?;
+            tracing::debug!("Cleanup finished");
+            retry_fn(|| async {
+                match check_location_is_empty(&file_io, &test_location, self, || {
+                    ValidationError::InvalidLocation {
+                        reason: "Files are left after remove_all on test location".to_string(),
+                        source: None,
+                        location: test_location.to_string(),
+                        storage_type: self.storage_type(),
+                    }
+                })
+                .await
+                {
+                    Err(e @ ValidationError::IoOperationFailed(_, _)) => {
+                        tracing::warn!(
                         "Error while checking location is empty: {e}, retrying up to three times.."
                     );
-                    Err(e)
+                        Err(e)
+                    }
+                    Ok(()) => {
+                        tracing::debug!("Location is empty");
+                        Ok(Ok(()))
+                    }
+                    Err(other) => {
+                        tracing::error!("Unrecoverable error: {other:?}");
+                        Ok(Err(other))
+                    }
                 }
-                Ok(()) => {
-                    tracing::debug!("Location is empty");
-                    Ok(Ok(()))
-                }
-                Err(other) => {
-                    tracing::error!("Unrecoverable error: {other:?}");
-                    Ok(Err(other))
-                }
-            }
-        })
-        .await??;
-        tracing::debug!("checked location is empty");
+            })
+            .await??;
+            tracing::debug!("checked location is empty");
+        }
+
         Ok(())
     }
 
@@ -466,14 +486,20 @@ impl StorageProfile {
             "Validating read/write access to: {test_location} using vended credentials"
         );
         match validate_options {
-            StorageValidation::Read => {
-                self.validate_read(&file_io, test_location).await?;
+            StorageValidation::Read { path } => {
+                self.validate_read(
+                    &file_io,
+                    self.base_location()?
+                        .cloning_push(path.as_str())
+                        .to_string(),
+                )
+                .await?;
             }
-            StorageValidation::ReadWriteDelete => {
+            StorageValidation::ReadWriteDelete {} => {
                 self.validate_read_write(&file_io, test_location, true)
                     .await?;
             }
-            StorageValidation::Skip => {}
+            StorageValidation::Skip {} => {}
         }
 
         Ok(())
@@ -482,20 +508,27 @@ impl StorageProfile {
     async fn validate_read(
         &self,
         file_io: &iceberg::io::FileIO,
-        test_location: &Location,
+        path: String,
     ) -> Result<(), ValidationError> {
-        tracing::debug!("Validating read access to : {test_location}");
-        let mut it = list_location(file_io, test_location, Some(1))
-            .await
-            .map_err(|e| {
-                tracing::error!("Error while listing location: {e:?}");
-                ValidationError::IoOperationFailed(e, Box::new(self.clone()))
-            })?;
-        let _ = it.next().await.transpose().map_err(|e| {
-            tracing::error!("Error while listing location: {e:?}");
-            ValidationError::IoOperationFailed(e, Box::new(self.clone()))
+        tracing::debug!("Validating read access to {path}");
+        let inf = file_io.new_input(path.as_str()).map_err(|e| {
+            tracing::info!("Error while creating input stream: {e:?}");
+            ValidationError::IoOperationFailed(IoError::FileInput(e), Box::new(self.clone()))
         })?;
-        tracing::debug!("Successfully read from location: {test_location}");
+        if !inf.exists().await.map_err(|e| {
+            ValidationError::IoOperationFailed(
+                IoError::FileRead(Box::new(e)),
+                Box::new(self.clone()),
+            )
+        })? {
+            return Err(ValidationError::InvalidLocation {
+                reason: "File does not exist".to_string(),
+                source: None,
+                location: path.to_string(),
+                storage_type: self.storage_type(),
+            });
+        }
+        tracing::debug!("Successfully read from location: {path}");
         Ok(())
     }
 
@@ -1200,11 +1233,7 @@ mod tests {
         let profile: StorageProfile = profile.into();
         let cred: StorageCredential = credential.into();
         profile
-            .validate_access(Some(&cred), None, StorageValidation::ReadWriteDelete)
-            .await
-            .expect("Failed to validate access");
-        profile
-            .validate_access(Some(&cred), None, StorageValidation::Read)
+            .validate_access(Some(&cred), None, StorageValidation::ReadWriteDelete {})
             .await
             .expect("Failed to validate access");
     }
@@ -1231,15 +1260,21 @@ mod tests {
         let profile = StorageProfile::from(profile);
 
         profile
-            .validate_access(None, None, StorageValidation::ReadWriteDelete)
+            .validate_access(None, None, StorageValidation::ReadWriteDelete {})
             .await
             .expect_err("Should fail to validate access");
         profile
-            .validate_access(None, None, StorageValidation::Read)
+            .validate_access(
+                None,
+                None,
+                StorageValidation::Read {
+                    path: "abc".to_string(),
+                },
+            )
             .await
             .expect_err("Should fail to validate access");
         profile
-            .validate_access(None, None, StorageValidation::Skip)
+            .validate_access(None, None, StorageValidation::Skip {})
             .await
             .expect("Should be able to create a bogus profile with skip.");
     }
