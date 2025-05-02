@@ -375,8 +375,11 @@ impl StorageProfile {
         // Run both validations in parallel
         let direct_validation = match &validate_options {
             StorageValidation::Read { path } => {
-                let location = self.base_location()?.cloning_push(path.as_str());
-                self.validate_read(&file_io, location.to_string()).boxed()
+                let mut file = self.base_location()?;
+                for loc in path.split('/') {
+                    file.push(loc);
+                }
+                self.validate_read(&file_io, file.to_string()).boxed()
             }
             StorageValidation::ReadWriteDelete {} => {
                 tracing::debug!("Validating read/write/delete access to {test_location}");
@@ -487,13 +490,11 @@ impl StorageProfile {
         );
         match validate_options {
             StorageValidation::Read { path } => {
-                self.validate_read(
-                    &file_io,
-                    self.base_location()?
-                        .cloning_push(path.as_str())
-                        .to_string(),
-                )
-                .await?;
+                let mut file = self.base_location()?;
+                for loc in path.split('/') {
+                    file.push(loc);
+                }
+                self.validate_read(&file_io, file.to_string()).await?;
             }
             StorageValidation::ReadWriteDelete {} => {
                 self.validate_read_write(&file_io, test_location, true)
@@ -522,7 +523,7 @@ impl StorageProfile {
             )
         })? {
             return Err(ValidationError::InvalidLocation {
-                reason: "File does not exist".to_string(),
+                reason: format!("File '{path}' does not exist"),
                 source: None,
                 location: path.to_string(),
                 storage_type: self.storage_type(),
