@@ -220,8 +220,26 @@ jobs:
           chmod +x ./mc
           ./mc alias set mb http://localhost:9000 minio-root-user minio-root-password
           ./mc admin user add mb read-only-user read-only-password
-          ./mc admin policy attach mb readonly --user read-only-user
-
+          cat > /tmp/readonly-policy.json << EOF
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Action": [
+                  "s3:GetObject",
+                  "s3:ListBucket"
+                ],
+                "Resource": [
+                  "arn:aws:s3:::${BUCKET_NAME}/*",
+                  "arn:aws:s3:::${BUCKET_NAME}"
+                ]
+              }
+            ]
+          }
+          EOF
+          ./mc admin policy add mb readonly-with-list /tmp/readonly-policy.json
+          ./mc admin policy attach mb readonly-with-list --user read-only-user
       - name: Test
         run: cargo nextest run --profile ci --all-targets --all-features --workspace
         env:
