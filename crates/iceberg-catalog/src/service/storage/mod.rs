@@ -19,7 +19,6 @@ use iceberg_ext::{
 pub use s3::{S3Credential, S3Flavor, S3Location, S3Profile};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
-use uuid::Uuid;
 
 use super::{secrets::SecretInStorage, NamespaceIdentUuid, TableIdentUuid};
 use crate::{
