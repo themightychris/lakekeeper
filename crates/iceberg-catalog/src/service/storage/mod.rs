@@ -87,7 +87,7 @@ pub struct TableConfig {
 }
 
 #[derive(Debug, Deserialize, Serialize, ToSchema, Clone)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "kebab-case", tag = "type")]
 pub enum StorageValidation {
     /// Perform read-only validation checks.
     Read {

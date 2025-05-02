@@ -1635,12 +1635,11 @@ pub(crate) mod test {
 
     // #[needs_env_var(TEST_MINIO = 1)]
     pub(crate) mod s3_compat {
-        use std::sync::LazyLock;
-
         use crate::service::storage::{
             s3::S3AccessKeyCredential, S3Credential, S3Flavor, S3Profile, StorageCredential,
             StorageProfile, StorageValidation,
         };
+        use std::sync::LazyLock;
 
         static TEST_BUCKET: LazyLock<String> =
             LazyLock::new(|| std::env::var("LAKEKEEPER_TEST__S3_BUCKET").unwrap());
@@ -1694,11 +1693,12 @@ pub(crate) mod test {
                 async {
                     let key_prefix = format!("test_prefix-{}", uuid::Uuid::now_v7());
                     let (profile, cred) = storage_profile(&key_prefix);
+
                     let mut profile: StorageProfile = profile.into();
                     let readonly_cred: StorageCredential =
                         S3Credential::AccessKey(S3AccessKeyCredential {
-                            aws_access_key_id: READ_ONLY_USER.clone(),
-                            aws_secret_access_key: READ_ONLY_PASSWORD.clone(),
+                            aws_access_key_id: dbg!(READ_ONLY_USER.clone()),
+                            aws_secret_access_key: dbg!(READ_ONLY_PASSWORD.clone()),
                             external_id: None,
                         })
                         .into();
@@ -1710,17 +1710,35 @@ pub(crate) mod test {
                         .validate_access(Some(&cred), None, StorageValidation::ReadWriteDelete {})
                         .await
                         .unwrap();
-                    let fio = profile.file_io(Some(&cred)).await.unwrap();
-                    let of = fio
-                        .new_output(
-                            profile
-                                .base_location()
-                                .unwrap()
-                                .cloning_push("read_this.txt")
-                                .as_str(),
-                        )
-                        .unwrap();
-                    of.write(b"hello world".as_slice().into()).await.unwrap();
+                    {
+                        let fio = profile.file_io(Some(&cred)).await.unwrap();
+                        let of = fio
+                            .new_output(
+                                profile
+                                    .base_location()
+                                    .unwrap()
+                                    .cloning_push("read_this.txt")
+                                    .as_str(),
+                            )
+                            .unwrap();
+                        of.write(b"hello world".as_slice().into()).await.unwrap();
+
+                        let fio = profile.file_io(Some(&readonly_cred)).await.unwrap();
+                        let inf = fio
+                            .new_input(
+                                profile
+                                    .base_location()
+                                    .unwrap()
+                                    .cloning_push("read_this.txt")
+                                    .as_str(),
+                            )
+                            .unwrap();
+                        let bytes = inf.read().await.unwrap();
+                        let bbytes: bytes::Bytes = b"hello world".as_slice().into();
+                        assert_eq!(bytes, bbytes);
+                        tracing::error!("{}", inf.location());
+                        assert!(inf.exists().await.unwrap());
+                    }
 
                     profile
                         .validate_access(
