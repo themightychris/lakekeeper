@@ -13,6 +13,11 @@ Shared query engines must use the same Identity Provider as Lakekeeper in both s
 
 We are tracking open issues and missing features in query engines in a [Tracking Issue on Github](https://github.com/lakekeeper/lakekeeper/issues/399).
 
+## Generic Iceberg REST Clients
+
+All Apache Iceberg REST clients are compatible with Lakekeeper, as Lakekeeper fully implements the standard Iceberg REST Catalog API specification. This page only contains some exemplary tools and configurations to help you get started. For tools not listed here, please refer to their documentation for specific configuration details and best practices when connecting to an Iceberg REST Catalog. Always check with your tool provider for the most up-to-date information regarding supported features and configuration options.
+
+When using Lakekeeper with authentication enabled, remember that you can follow the approaches described at the beginning of this page: either use credentials specific to individual users or leverage OAuth2 token exchange for shared query engines. The authentication parameters typically include credential pairs, OAuth2 server URIs, and scopes as shown in the examples above.
 
 ## <img src="/assets/trino.svg" width="30"> Trino
 
@@ -190,6 +195,44 @@ catalog = pyiceberg.catalog.rest.RestCatalog(
 print(catalog.list_namespaces())
 ```
 
+## <img src="/assets/athena.svg" width="30"> AWS Athena (Spark)
+
+Amazon Athena is a serverless query service that allows you to use SQL or PySpark to query data in Lakekeeper without provisioning infrastructure. The following steps demonstrate how to connect Athena PySpark with Lakekeeper.
+
+**1. Create an Apache Spark workgroup in the AWS Athena console:**
+
+* Go to the Athena console > Administration > Workgroups
+* Create a workgroup with Apache Spark as the analytics engine
+
+**2. Create a new PySpark notebook:**
+
+* Give your notebook a name
+* Select your Spark workgroup
+* Configure JSON properties with Lakekeeper catalog settings
+
+    ```json
+    {
+        "spark.sql.catalog.lakekeeper": "org.apache.iceberg.spark.SparkCatalog",
+        "spark.sql.catalog.lakekeeper.type": "rest",
+        "spark.sql.catalog.lakekeeper.uri": "<Lakekeeper Catalog URI>",
+        "spark.sql.catalog.lakekeeper.warehouse": "<Name of the Warehouse in Lakekeeper>",
+        "spark.sql.defaultCatalog": "lakekeeper",
+        "spark.sql.extensions": "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
+        "spark.sql.catalog.lakekeeper.credential": "<Client-ID>:<Client-Secret>", 
+        "spark.sql.catalog.lakekeeper.oauth2-server-uri": "<Token Endpoint of your IdP>"
+    }
+    ```
+
+**3. Verify the connection in your notebook:**
+
+```python
+# Verify connectivity to your Lakekeeper catalog
+spark.sql("select count(*) from lakekeeper.<namespace>.<table>").show()
+```
+
+Amazon Athena has Iceberg pre-installed, so no additional package installations are required.
+
+
 ## <img src="/assets/starrocks.svg" width="30"> Starrocks
 
 Starrocks is improving the Iceberg REST support quickly. This guide is written for Starrocks 3.3, which does not support vended-credentials for AWS S3 with custom endpoints.
@@ -223,5 +266,24 @@ The following docker compose examples are available for starrocks:
         "aws.s3.endpoint" = "<Custom S3 endpoint>",
         "aws.s3.enable_path_style_access" = "true"
     )
+    ```
+
+## <img src="/assets/olake.svg" width="30"> OLake
+
+OLake is an open-source, quick and scalable tool for replicating Databases to Apache Iceberg or Data Lakehouses written in Go. Visit the [Olake Iceberg Documentation](https://olake.io/docs/writers/iceberg/catalog/rest#rest-catalog) for the full documentation, and additional information on Olake.
+
+=== "S3-Compatible"
+
+    ```json
+    {
+    "type": "ICEBERG",
+        "writer": {
+            "catalog_type": "rest",
+            "normalization": false,
+            "rest_catalog_url": "http://localhost:8181/catalog",
+            "iceberg_s3_path": "warehouse",
+            "iceberg_db": "ICEBERG_DATABASE_NAME"
+        }
+    }
     ```
 

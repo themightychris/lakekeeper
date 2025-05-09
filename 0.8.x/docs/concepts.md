@@ -14,7 +14,7 @@ Lakekeeper is an implementation of the Apache Iceberg REST Catalog API.  Lakekee
 * **Identity Provider** (optional): Lakekeeper can authenticate incoming requests using any OIDC capable Identity Provider (IdP). Lakekeeper can also natively authenticate kubernetes service accounts.
 * **Authorization System** (optional): For permission management, Lakekeeper uses the wonderful [OpenFGA](http://openfga.dev) Project. OpenFGA is automatically deployed in our docker-compose and helm installations. Authorization can only be used if Lakekeeper is connected to an Identity Provider.
 * **Secret Store** (optional): By default, Lakekeeper stores all secrets (i.e. S3 access credentials) encrypted in the Persistence Backend. To increase security, Lakekeeper can also use external systems to store secrets. Currently all Hashicorp-Vault like stores are supported.
-* **Event Store** (optional): Lakekeeper can send Change Events to an Event Store. Currently [Nats](http://nats.io) is supported, we are working on support for [Apache Kafka](http://kafka.apache.org)
+* **Event Store** (optional): Lakekeeper can send Change Events to an Event Store. We support [Nats](http://nats.io) and [Apache Kafka](http://kafka.apache.org)
 * **Data Contract System** (optional): Lakekeeper can interface with external data contract systems to prohibit breaking changes to your tables.
 
 To get started quickly with the latest version of Lakekeeper check our [Getting Started Guide](../../getting-started.md).
@@ -72,7 +72,70 @@ Projects can contain multiple Roles, allowing Roles to be reused in all Warehous
 Currently all tables stored in Lakekeeper are assumed to be managed by Lakekeeper. The concept of "external" tables will follow in a later release. When managed tables are dropped, Lakekeeper defaults to setting `purgeRequested` parameter of the `dropTable` endpoint to true unless explicitly set to false. Currently most query engines do not set this flag, which defaults to enabling purge. If purge is enabled for a drop, all files of the table are removed.
 
 ## Soft Deletion
-In Lakekeeper, warehouses can enable soft deletion. If soft deletion is enabled for a warehouse, when a table or view is dropped, it is not immediately deleted from the catalog. Instead, it is marked as dropped and a job for its cleanup is scheduled. The table is then deleted after the warehouse specific expiration delay has passed. This will allow for a recovery of tables that have been dropped by accident. "Undropping" a table is only possible if soft-deletes are enabled for a Warehouse. The expiration delay is determined at the time of dropping the table, that means changing the delay in the warehouse settings will only affect newly dropped tables. If you want "soft-deleted" tables to be gone faster, undrop the tables, change the expiration delay and re-drop them.
+Lakekeeper allows warehouses to enable soft deletion as a data protection mechanism. When enabled:
+
+- Tables and views aren't immediately removed from the catalog when dropped
+- Instead, they're marked as deleted and scheduled for cleanup
+- The data remains recoverable until the configured expiration period elapses
+- Recovery is only possible for warehouses with soft deletion enabled
+- The expiration delay is fixed at the time of dropping - changing warehouse settings only affects newly dropped tables
+
+Soft deletion works correctly only when clients follow these behaviors:
+
+1. `DROP TABLE xyz` (standard): Clients should not remove any files themselves, and should call the `dropTable` endpoint without the `purgeRequested` flag. Lakekeeper handles file removal for managed tables. This works well with all query engines.
+
+2. `DROP TABLE xyz PURGE`: Clients should not delete files themselves, and should call the `dropTable` endpoint with the `purgeRequested` flag set to true. Lakekeeper will remove files for managed tables (and for unmanaged tables in a future release). Unfortunately not all query engines adhere to this behavior, as described below.
+
+Unfortunately, some Java-based query engines like Spark don't follow the expected behavior for `PURGE` operations. Instead, they immediately delete files, which undermines soft deletion functionality. The Apache Iceberg community has [agreed to fix this in Iceberg 2.0](https://github.com/apache/iceberg/pull/11317#issuecomment-2604912801). For Iceberg 1.x versions, we're working on a new `io.client-side.purge-enabled` flag for better control.
+
+!!! warning
+    Never use **`DROP TABLE xyz PURGE`** with clients like Spark that immediately remove files when soft deletion is enabled!
+
+For S3-based storage, Lakekeeper provides a protective configuration option in storage profiles: `push-s3-delete-disabled`. When set to `true`, this:
+
+- Prevents clients from deleting files by pushing the `s3.delete-enabled: false` setting to clients
+- Preserves soft deletion functionality even when `PURGE` is specified
+- Affects all file deletion operations, including maintenance procedures like `expire_snapshots`
+
+When running table maintenance procedures that need to remove files with `push-s3-delete-disabled: true`, you must explicitly override with `s3.delete-enabled: true` in your client configuration:
+
+```python
+import pyspark
+import pyspark.sql
+
+pyspark_version = pyspark.__version__
+pyspark_version = ".".join(pyspark_version.split(".")[:2]) # Strip patch version
+iceberg_version = "1.8.1"
+
+# Disable the jars which are not needed
+spark_jars_packages = (
+    f"org.apache.iceberg:iceberg-spark-runtime-{pyspark_version}_2.12:{iceberg_version},"
+    f"org.apache.iceberg:iceberg-aws-bundle:{iceberg_version},"
+)
+
+catalog_name = "lakekeeper"
+configuration = {
+    "spark.jars.packages": spark_jars_packages,
+    "spark.sql.extensions": "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
+    "spark.sql.defaultCatalog": catalog_name,
+    f"spark.sql.catalog.{catalog_name}": "org.apache.iceberg.spark.SparkCatalog",
+    f"spark.sql.catalog.{catalog_name}.catalog-impl": "org.apache.iceberg.rest.RESTCatalog",
+    f"spark.sql.catalog.{catalog_name}.uri": "<Lakekeeper Catalog URI, i.e. http://localhost:8181/catalog>",
+    # ... Additional configuration options
+    # THE FOLLOWING IS THE NEW OPTION:
+    # Enabling s3 deletion explicitly - this overrides any Lakekeeper setting
+    f"spark.sql.catalog.{catalog_name}.s3.delete-enabled": "true",
+}
+
+spark_conf = pyspark.SparkConf().setMaster("local[*]")
+
+for k, v in configuration.items():
+    spark_conf = spark_conf.set(k, v)
+
+spark = pyspark.sql.SparkSession.builder.config(conf=spark_conf).getOrCreate()
+spark.sql(f"USE {catalog_name}")
+```
+
 
 ## Protection and Deletion Mechanisms in Lakekeeper
 Lakekeeper provides several complementary mechanisms for protecting data assets and managing their deletion while balancing flexibility and data governance.
