@@ -479,9 +479,9 @@ When using system identity, Lakekeeper will use the service account associated w
 
 HDFS Support in this Lakekeeper version is in Preview. Warehouse configuration may change in the future. Lakekeeper does not manage access for clients to HDFS Locations. If permissions in Lakekeeper are applied, they effect metadata only.
 
-Lakekeeper supports using Hadoop Distributed File System (HDFS) as a storage location for Iceberg tables. This integration is built on the [hdfs-native](https://crates.io/crates/hdfs-native) crate, which provides native Rust bindings to libhdfs3 for high-performance HDFS access without requiring a JVM.
+Lakekeeper supports using Hadoop Distributed File System (HDFS) as a storage location for Iceberg tables. This integration is built on the [hdfs-native](https://crates.io/crates/hdfs-native) crate, which is a native Rust implementation of HDFS for high-performance HDFS access without requiring a JVM.
 
-To enable HDFS support system-wide, set the following environment variabe:
+To enable HDFS support system-wide, set the following environment variable:
 
 ```bash
 LAKEKEEPER__ENABLE_HDFS_WITH_SYSTEM_CREDENTIALS=true
