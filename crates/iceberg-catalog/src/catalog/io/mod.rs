@@ -63,10 +63,7 @@ impl LakekeeperFileIO {
             }
         }
         .inspect_err(|e| {
-            tracing::info!(
-                ?e,
-                "Failed to delete write metadata to `{metadata_location}`"
-            );
+            tracing::info!(?e, "Failed to write metadata to `{metadata_location}`");
         })?;
         Ok(())
     }
