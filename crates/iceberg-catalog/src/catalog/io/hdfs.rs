@@ -47,12 +47,19 @@ pub(crate) async fn atomic_write(
         .close()
         .await
         .map_err(|e| IoError::FileWrite(Box::new(e)))?;
+    tracing::trace!(
+        "HDFS Atomic write: Finished writing to temporary file `{tmp_file_path}` before atomic rename to `{file_path}`."
+    );
 
     // Rename the temporary file to the final file name
     client
         .rename(&tmp_file_path, file_path, overwrite)
         .await
-        .map_err(|e| IoError::FileWrite(Box::new(e)))?;
+        .map_err(|e| {
+            tracing::error!(
+                "HDFS Atomic write: Failed to rename temporary file `{tmp_file_path}` to `{file_path}`: {e}"
+            );            
+            IoError::FileWrite(Box::new(e))})?;
 
     Ok(())
 }

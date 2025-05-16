@@ -65,7 +65,7 @@ impl LakekeeperFileIO {
         .inspect_err(|e| {
             tracing::info!(
                 ?e,
-                "Failed to delete table metadata from `{metadata_location}`"
+                "Failed to delete write metadata to `{metadata_location}`"
             );
         })?;
         Ok(())
@@ -272,19 +272,19 @@ pub enum IoError {
     FileInput(#[source] iceberg::Error),
     #[error("Failed to create file writer. Please check the storage credentials: {}", .0)]
     FileWriterCreation(#[source] iceberg::Error),
-    #[error("Failed to serialize data.")]
+    #[error("Failed to serialize data. {}", .0)]
     Serialization(#[source] serde_json::Error),
-    #[error("Failed to deserialize table metadata")]
+    #[error("Failed to deserialize table metadata: {}", .0)]
     TableMetadataDeserialization(#[source] serde_json::Error),
     #[error("Failed to write table metadata to compressed buffer: {}", .0)]
     Write(#[source] iceberg::Error),
-    #[error("Failed to finish compressing file")]
+    #[error("Failed to finish compressing file. {}", .0)]
     FileCompression(#[source] Box<dyn std::error::Error + Sync + Send + 'static>),
-    #[error("Failed to finish decompressing file")]
+    #[error("Failed to finish decompressing file. {}", .0)]
     FileDecompression(#[source] Box<dyn std::error::Error + Sync + Send + 'static>),
-    #[error("Failed to write file. Please check the storage credentials.")]
+    #[error("Failed to write file. {}", .0)]
     FileWrite(#[source] Box<dyn std::error::Error + Sync + Send + 'static>),
-    #[error("Failed to read file. Please check the storage credentials.")]
+    #[error("Failed to read file. {}", .0)]
     FileRead(#[source] Box<dyn std::error::Error + Sync + Send + 'static>),
     #[error("Failed to close file. Please check the storage credentials: {}", .0)]
     FileClose(#[source] iceberg::Error),
