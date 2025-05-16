@@ -97,6 +97,9 @@ pub struct DynAppConfig {
     /// Bind IP the server listens on.
     /// Defaults to 0.0.0.0
     pub bind_ip: IpAddr,
+    /// If x-forwarded-x headers should be respected.
+    /// Defaults to true
+    pub use_x_forwarded_headers: bool,
     /// If true (default), the NIL uuid is used as default project id.
     pub enable_default_project: bool,
     /// Template to obtain the "prefix" for a warehouse,
@@ -173,6 +176,7 @@ pub struct DynAppConfig {
 
     // ------------- KAFKA CLOUDEVENTS -------------
     pub kafka_topic: Option<String>,
+    #[cfg(feature = "kafka")]
     pub kafka_config: Option<KafkaConfig>,
 
     // ------------- TRACING CLOUDEVENTS ----------
@@ -444,6 +448,7 @@ impl Default for DynAppConfig {
             base_uri: None,
             metrics_port: 9000,
             enable_default_project: true,
+            use_x_forwarded_headers: true,
             prefix_template: "{warehouse_id}".to_string(),
             allow_origin: None,
             reserved_namespaces: ReservedNamespaces(HashSet::from([
@@ -478,6 +483,7 @@ impl Default for DynAppConfig {
             nats_user: None,
             nats_password: None,
             nats_token: None,
+            #[cfg(feature = "kafka")]
             kafka_config: None,
             kafka_topic: None,
             log_cloudevents: None,
@@ -911,6 +917,7 @@ mod test {
     fn test_openfga_config_no_auth() {
         figment::Jail::expect_with(|jail| {
             jail.set_env("LAKEKEEPER_TEST__AUTHZ_BACKEND", "openfga");
+            jail.set_env("LAKEKEEPER_TEST__OPENFGA__ENDPOINT", "http://localhost");
             jail.set_env("LAKEKEEPER_TEST__OPENFGA__STORE_NAME", "store_name");
             let config = get_config();
             let authz_config = config.openfga.unwrap();
@@ -927,6 +934,7 @@ mod test {
     fn test_openfga_config_api_key() {
         figment::Jail::expect_with(|jail| {
             jail.set_env("LAKEKEEPER_TEST__AUTHZ_BACKEND", "openfga");
+            jail.set_env("LAKEKEEPER_TEST__OPENFGA__ENDPOINT", "http://localhost");
             jail.set_env("LAKEKEEPER_TEST__OPENFGA__API_KEY", "api_key");
             let config = get_config();
             let authz_config = config.openfga.unwrap();
@@ -946,6 +954,7 @@ mod test {
     fn test_openfga_client_config_fails_without_token() {
         figment::Jail::expect_with(|jail| {
             jail.set_env("LAKEKEEPER_TEST__AUTHZ_BACKEND", "openfga");
+            jail.set_env("LAKEKEEPER_TEST__OPENFGA__ENDPOINT", "http://localhost");
             jail.set_env("LAKEKEEPER_TEST__OPENFGA__CLIENT_ID", "client_id");
             jail.set_env("LAKEKEEPER_TEST__OPENFGA__STORE_NAME", "store_name");
             get_config();
@@ -957,6 +966,7 @@ mod test {
     fn test_openfga_client_credentials() {
         figment::Jail::expect_with(|jail| {
             jail.set_env("LAKEKEEPER_TEST__AUTHZ_BACKEND", "openfga");
+            jail.set_env("LAKEKEEPER_TEST__OPENFGA__ENDPOINT", "http://localhost");
             jail.set_env("LAKEKEEPER_TEST__OPENFGA__CLIENT_ID", "client_id");
             jail.set_env("LAKEKEEPER_TEST__OPENFGA__CLIENT_SECRET", "client_secret");
             jail.set_env(
@@ -985,6 +995,7 @@ mod test {
     fn test_openfga_client_credentials_with_scope() {
         figment::Jail::expect_with(|jail| {
             jail.set_env("LAKEKEEPER_TEST__AUTHZ_BACKEND", "openfga");
+            jail.set_env("LAKEKEEPER_TEST__OPENFGA__ENDPOINT", "http://localhost");
             jail.set_env("LAKEKEEPER_TEST__OPENFGA__CLIENT_ID", "client_id");
             jail.set_env("LAKEKEEPER_TEST__OPENFGA__CLIENT_SECRET", "client_secret");
             jail.set_env("LAKEKEEPER_TEST__OPENFGA__SCOPE", "openfga");
@@ -1079,6 +1090,7 @@ mod test {
     }
 
     #[test]
+
     fn test_hdfs_enable() {
         figment::Jail::expect_with(|jail| {
             jail.set_env(
@@ -1087,6 +1099,23 @@ mod test {
             );
             let config = get_config();
             assert!(config.enable_hdfs_with_system_credentials);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn test_use_x_forwarded_headers() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("LAKEKEEPER_TEST__USE_X_FORWARDED_HEADERS", "true");
+            let config = get_config();
+            assert!(config.use_x_forwarded_headers);
+            Ok(())
+        });
+
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("LAKEKEEPER_TEST__USE_X_FORWARDED_HEADERS", "false");
+            let config = get_config();
+            assert!(!config.use_x_forwarded_headers);
             Ok(())
         });
     }
