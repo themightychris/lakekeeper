@@ -84,8 +84,7 @@ impl TaskQueues {
                             .await
                         {
                             // TODO: Do we even want to record_failure for this?
-                            let _ = self
-                                .queue
+                            self.queue
                                 .retrying_record_failure(
                                     &task,
                                     &format!("Failed to forward task to task queue handler {e}"),
@@ -151,7 +150,7 @@ impl TaskQueues {
         Ok(())
     }
 
-    /// Spawns the built-in queues, currently tabular_expiration and tabular_purge alongside any
+    /// Spawns the built-in queues, currently `tabular_expiration_queue` and `tabular_purge_queue` alongside any
     /// registered custom queues.
     ///
     /// # Errors
