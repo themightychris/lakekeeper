@@ -44,8 +44,8 @@ impl TaskQueue for PgQueue {
         pick_task(&self.read_write.write_pool, queue_name, &self.max_age).await
     }
 
-    async fn record_success(&self, id: Uuid) -> crate::api::Result<()> {
-        record_success(id, &self.read_write.write_pool).await
+    async fn record_success(&self, id: Uuid, message: Option<&str>) -> crate::api::Result<()> {
+        record_success(id, &self.read_write.write_pool, message).await
     }
 
     async fn record_failure(&self, id: Uuid, error_details: &str) -> crate::api::Result<()> {
@@ -131,13 +131,13 @@ pub(crate) async fn queue_task_batch(
                 parent_task_id,
                 warehouse_id,
                 suspend_until,
-                state,
+                task_data,
                 entity_id,
                 entity_type)
         SELECT
             i.task_id,
             i.queue_name,
-            'pending'::task_status,
+            'pending'::task_intermediate_status,
             i.parent_task_id,
             i.warehouse_id,
             i.suspend_until,
@@ -196,7 +196,7 @@ r#" WITH updated_task AS (
     SET status = 'running', picked_up_at = $2, attempt = task.attempt + 1
     FROM updated_task
     WHERE task.task_id = updated_task.task_id
-    RETURNING task.task_id, task.entity_id, task.entity_type as "entity_type: EntityType", task.warehouse_id, task.state, task.suspend_until, task.status as "status: TaskStatus", task.picked_up_at, task.attempt, task.parent_task_id, task.queue_name, (select config from cfg)
+    RETURNING task.task_id, task.entity_id, task.entity_type as "entity_type: EntityType", task.warehouse_id, task.task_data, task.suspend_until, task.status as "status: TaskStatus", task.picked_up_at, task.attempt, task.parent_task_id, task.queue_name, (select config from cfg)
     "#,
         queue_name,
         Utc::now(),
@@ -209,7 +209,7 @@ r#" WITH updated_task AS (
             e.into_error_model(format!("Failed to pick a '{queue_name}' task")) })?;
 
     if let Some(task) = x {
-        tracing::info!("Picked up task: {:?}", task);
+        tracing::trace!("Picked up task: {:?}", task);
         return Ok(Some(Task {
             task_metadata: TaskMetadata {
                 warehouse_id: task.warehouse_id.into(),
@@ -225,24 +225,29 @@ r#" WITH updated_task AS (
             queue_name: task.queue_name,
             picked_up_at: task.picked_up_at,
             attempt: task.attempt,
-            state: task.state,
+            state: task.task_data,
         }));
     }
 
     Ok(None)
 }
 
-async fn record_success(id: Uuid, pool: &PgPool) -> Result<(), IcebergErrorResponse> {
+async fn record_success(
+    id: Uuid,
+    pool: &PgPool,
+    message: Option<&str>,
+) -> Result<(), IcebergErrorResponse> {
     let _ = sqlx::query!(
         r#"
         WITH history as (
-            INSERT INTO task_log(task_id, warehouse_id, queue_name, state, status, entity_id, entity_type)
-                SELECT task_id, warehouse_id, queue_name, state, 'success', entity_id, entity_type FROM task
+            INSERT INTO task_log(task_id, warehouse_id, queue_name, task_data, status, entity_id, entity_type, message, attempt)
+                SELECT task_id, warehouse_id, queue_name, task_data, 'success', entity_id, entity_type, $2, attempt FROM task
                                                                         WHERE task_id = $1)
         DELETE FROM task
         WHERE task_id = $1
         "#,
-        id
+        id,
+        message
     )
     .execute(pool)
     .await
@@ -274,8 +279,8 @@ async fn record_failure(
         sqlx::query!(
             r#"
             WITH history as (
-                INSERT INTO task_log(task_id, warehouse_id, queue_name, state, status, entity_id, entity_type)
-                SELECT task_id, warehouse_id, queue_name, state, 'failure', entity_id, entity_type
+                INSERT INTO task_log(task_id, warehouse_id, queue_name, task_data, status, entity_id, entity_type, attempt)
+                SELECT task_id, warehouse_id, queue_name, task_data, 'failure', entity_id, entity_type, attempt
                 FROM task WHERE task_id = $1
             )
             DELETE FROM task
@@ -289,9 +294,13 @@ async fn record_failure(
     } else {
         sqlx::query!(
             r#"
+            WITH task_log as (
+                INSERT INTO task_log(task_id, warehouse_id, queue_name, task_data, status, entity_id, entity_type, message, attempt)
+                SELECT task_id, warehouse_id, queue_name, task_data, 'failure', entity_id, entity_type, $2, attempt
+                FROM task WHERE task_id = $1
+            )
             UPDATE task
-            SET status = 'pending',
-                last_error_details = $2
+            SET status = 'pending', attempt = attempt + 1
             WHERE task_id = $1
             "#,
             id,
@@ -318,8 +327,8 @@ pub(crate) async fn cancel_pending_tasks(
         TaskFilter::WarehouseId(warehouse_id) => {
             sqlx::query!(
                 r#"WITH log as (
-                        INSERT INTO task_log(task_id, warehouse_id, queue_name, state, entity_id, entity_type, status)
-                        SELECT task_id, warehouse_id, queue_name, state, entity_id, entity_type, 'cancellation'
+                        INSERT INTO task_log(task_id, warehouse_id, queue_name, task_data, entity_id, entity_type, status, attempt)
+                        SELECT task_id, warehouse_id, queue_name, task_data, entity_id, entity_type, 'cancellation', attempt
                         FROM task
                         WHERE status = 'pending' AND warehouse_id = $1 AND queue_name = $2
                     )
@@ -344,8 +353,8 @@ pub(crate) async fn cancel_pending_tasks(
         TaskFilter::TaskIds(task_ids) => {
             sqlx::query!(
                 r#"WITH log as (
-                        INSERT INTO task_log(task_id, warehouse_id, queue_name, state, status, entity_id, entity_type)
-                        SELECT task_id, warehouse_id, queue_name, state, 'cancellation', entity_id, entity_type
+                        INSERT INTO task_log(task_id, warehouse_id, queue_name, task_data, status, entity_id, entity_type, attempt)
+                        SELECT task_id, warehouse_id, queue_name, task_data, 'cancellation', entity_id, entity_type, attempt
                         FROM task
                         WHERE status = 'pending' AND task_id = ANY($1)
                     )
@@ -543,7 +552,7 @@ mod test {
         assert!(task.task_metadata.parent_task_id.is_none());
         assert_eq!(&task.queue_name, "test");
 
-        record_success(id, &pool).await.unwrap();
+        record_success(id, &pool, Some("")).await.unwrap();
 
         assert!(pick_task(&pool, "test", &queue.max_age)
             .await
@@ -588,7 +597,7 @@ mod test {
         assert_eq!(&task.queue_name, "test");
         assert_eq!(task.state, serde_json::json!({"a": "a"}));
 
-        record_success(task.task_id, &pool).await.unwrap();
+        record_success(task.task_id, &pool, Some("")).await.unwrap();
 
         let id2 = queue_task(
             &mut conn,
@@ -892,8 +901,8 @@ mod test {
         assert!(task2.task_metadata.parent_task_id.is_none());
         assert_eq!(&task2.queue_name, "test");
 
-        record_success(task.task_id, &pool).await.unwrap();
-        record_success(id2, &pool).await.unwrap();
+        record_success(task.task_id, &pool, Some("")).await.unwrap();
+        record_success(id2, &pool, Some("")).await.unwrap();
     }
 
     #[sqlx::test]
@@ -962,8 +971,8 @@ mod test {
         assert!(task2.task_metadata.parent_task_id.is_none());
         assert_eq!(&task2.queue_name, "test");
 
-        record_success(task.task_id, &pool).await.unwrap();
-        record_success(id2, &pool).await.unwrap();
+        record_success(task.task_id, &pool, Some("")).await.unwrap();
+        record_success(id2, &pool, Some("")).await.unwrap();
     }
 
     fn task_metadata(warehouse_id: WarehouseId, entity_id: EntityId) -> TaskMetadata {
@@ -1059,8 +1068,8 @@ mod test {
 
         // move both old tasks to done which will clear them from task table and move them into
         // task_log
-        record_success(id, &pool).await.unwrap();
-        record_success(id2, &pool).await.unwrap();
+        record_success(id, &pool, Some("")).await.unwrap();
+        record_success(id2, &pool, Some("")).await.unwrap();
 
         // Re-insert two tasks with previously used idempotency keys
         let ids_third = queue_task_batch(
@@ -1077,7 +1086,7 @@ mod test {
         assert_eq!(ids_third.len(), 1);
         let id = ids_third[0].task_id;
 
-        record_success(id, &pool).await.unwrap();
+        record_success(id, &pool, Some("")).await.unwrap();
 
         // pick one new task, one re-inserted task
         let task = pick_task(&pool, "test", &queue.max_age)
@@ -1100,6 +1109,6 @@ mod test {
             "There should be no tasks left, something is wrong."
         );
 
-        record_success(task.task_id, &pool).await.unwrap();
+        record_success(task.task_id, &pool, Some("")).await.unwrap();
     }
 }

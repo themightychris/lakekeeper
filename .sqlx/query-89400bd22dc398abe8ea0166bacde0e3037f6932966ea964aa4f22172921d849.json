@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": " WITH updated_task AS (\n        SELECT task_id, warehouse_id\n        FROM task\n        WHERE (status = 'pending' AND queue_name = $1 AND ((suspend_until < now() AT TIME ZONE 'UTC') OR (suspend_until IS NULL)))\n                OR (status = 'running' AND (now() - picked_up_at) > $3)\n        FOR UPDATE SKIP LOCKED\n        LIMIT 1\n    ),\n    cfg AS (SELECT config from task_config WHERE queue_name = $1 and warehouse_id = any(select warehouse_id from updated_task))\n    UPDATE task\n    SET status = 'running', picked_up_at = $2, attempt = task.attempt + 1\n    FROM updated_task\n    WHERE task.task_id = updated_task.task_id\n    RETURNING task.task_id, task.entity_id, task.entity_type as \"entity_type: EntityType\", task.warehouse_id, task.state, task.suspend_until, task.status as \"status: TaskStatus\", task.picked_up_at, task.attempt, task.parent_task_id, task.queue_name, (select config from cfg)\n    ",
+  "query": " WITH updated_task AS (\n        SELECT task_id, warehouse_id\n        FROM task\n        WHERE (status = 'pending' AND queue_name = $1 AND ((suspend_until < now() AT TIME ZONE 'UTC') OR (suspend_until IS NULL)))\n                OR (status = 'running' AND (now() - picked_up_at) > $3)\n        FOR UPDATE SKIP LOCKED\n        LIMIT 1\n    ),\n    cfg AS (SELECT config from task_config WHERE queue_name = $1 and warehouse_id = any(select warehouse_id from updated_task))\n    UPDATE task\n    SET status = 'running', picked_up_at = $2, attempt = task.attempt + 1\n    FROM updated_task\n    WHERE task.task_id = updated_task.task_id\n    RETURNING task.task_id, task.entity_id, task.entity_type as \"entity_type: EntityType\", task.warehouse_id, task.task_data, task.suspend_until, task.status as \"status: TaskStatus\", task.picked_up_at, task.attempt, task.parent_task_id, task.queue_name, (select config from cfg)\n    ",
   "describe": {
     "columns": [
       {
@@ -34,7 +34,7 @@
       },
       {
         "ordinal": 4,
-        "name": "state",
+        "name": "task_data",
         "type_info": "Jsonb"
       },
       {
@@ -47,7 +47,7 @@
         "name": "status: TaskStatus",
         "type_info": {
           "Custom": {
-            "name": "task_status",
+            "name": "task_intermediate_status",
             "kind": {
               "Enum": [
                 "running",
@@ -105,5 +105,5 @@
       null
     ]
   },
-  "hash": "3755617259f6334d3237d686e9f8f45d7a326af2d540087481ec3e12e83b8024"
+  "hash": "89400bd22dc398abe8ea0166bacde0e3037f6932966ea964aa4f22172921d849"
 }

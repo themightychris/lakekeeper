@@ -80,7 +80,7 @@ async fn instrumented_purge<S: SecretStore, C: Catalog>(
     .await
     {
         Ok(()) => {
-            queues.retrying_record_success(task).await;
+            queues.retrying_record_success(task, None).await;
             tracing::info!(
                 "Successfully cleaned up tabular at location {}",
                 purge_task.tabular_location

@@ -294,11 +294,11 @@ pub struct Task {
 #[async_trait]
 pub trait TaskQueue: Debug {
     async fn pick_new_task(&self, queue_name: &str) -> crate::api::Result<Option<Task>>;
-    async fn record_success(&self, id: Uuid) -> crate::api::Result<()>;
+    async fn record_success(&self, id: Uuid, message: Option<&str>) -> crate::api::Result<()>;
     async fn record_failure(&self, id: Uuid, error_details: &str) -> crate::api::Result<()>;
 
-    async fn retrying_record_success(&self, task: &Task) {
-        self.retrying_record_success_or_failure(task, Status::Success)
+    async fn retrying_record_success(&self, task: &Task, details: Option<&str>) {
+        self.retrying_record_success_or_failure(task, Status::Success(details))
             .await;
     }
 
@@ -310,7 +310,7 @@ pub trait TaskQueue: Debug {
     async fn retrying_record_success_or_failure(&self, task: &Task, result: Status<'_>) {
         let mut retry = 0;
         while let Err(e) = match result {
-            Status::Success => self.record_success(task.task_id).await,
+            Status::Success(details) => self.record_success(task.task_id, details).await,
             Status::Failure(details) => self.record_failure(task.task_id, details).await,
         } {
             tracing::error!("Failed to record {}: {:?}", result, e);
@@ -364,7 +364,7 @@ impl Task {
 #[cfg_attr(feature = "sqlx-postgres", derive(sqlx::Type))]
 #[cfg_attr(
     feature = "sqlx-postgres",
-    sqlx(type_name = "task_status", rename_all = "kebab-case")
+    sqlx(type_name = "task_intermediate_status", rename_all = "kebab-case")
 )]
 pub enum TaskStatus {
     Pending,
@@ -373,14 +373,14 @@ pub enum TaskStatus {
 
 #[derive(Debug)]
 pub enum Status<'a> {
-    Success,
+    Success(Option<&'a str>),
     Failure(&'a str),
 }
 
 impl std::fmt::Display for Status<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Status::Success => write!(f, "success"),
+            Status::Success(details) => write!(f, "success ({})", details.unwrap_or("")),
             Status::Failure(details) => write!(f, "failure ({details})"),
         }
     }

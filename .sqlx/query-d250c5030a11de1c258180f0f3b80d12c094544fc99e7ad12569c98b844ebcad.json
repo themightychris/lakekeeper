@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH log as (\n                        INSERT INTO task_log(task_id, warehouse_id, queue_name, task_data, entity_id, entity_type, status, attempt)\n                        SELECT task_id, warehouse_id, queue_name, task_data, entity_id, entity_type, 'cancellation', attempt\n                        FROM task\n                        WHERE status = 'pending' AND warehouse_id = $1 AND queue_name = $2\n                    )\n                    DELETE FROM task\n                    WHERE status = 'pending' AND warehouse_id = $1 AND queue_name = $2\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d250c5030a11de1c258180f0f3b80d12c094544fc99e7ad12569c98b844ebcad"
+}

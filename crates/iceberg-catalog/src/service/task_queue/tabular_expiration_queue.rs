@@ -84,7 +84,7 @@ async fn instrumented_expire<C: Catalog, A: Authorizer>(
     .await
     {
         Ok(()) => {
-            queue.retrying_record_success(task).await;
+            queue.retrying_record_success(task, None).await;
             tracing::debug!("Successful {expiration:?}");
         }
         Err(e) => {
