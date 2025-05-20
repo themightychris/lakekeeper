@@ -300,7 +300,7 @@ async fn record_failure(
                 FROM task WHERE task_id = $1
             )
             UPDATE task
-            SET status = 'pending', attempt = attempt + 1
+            SET status = 'pending'
             WHERE task_id = $1
             "#,
             id,
