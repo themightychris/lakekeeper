@@ -1,10 +1,9 @@
-use std::sync::Arc;
-
 use serde::{Deserialize, Serialize};
 use tracing::Instrument;
+use utoipa::ToSchema;
 use uuid::Uuid;
 
-use super::{EntityId, TaskMetadata};
+use super::{EntityId, QueueConfig, TaskMetadata, TaskQueue, DEFAULT_MAX_AGE};
 use crate::{
     api::{
         management::v1::{DeleteKind, TabularType},
@@ -12,7 +11,7 @@ use crate::{
     },
     service::{
         authz::Authorizer,
-        task_queue::{tabular_purge_queue::TabularPurge, Task, TaskQueue},
+        task_queue::{tabular_purge_queue::TabularPurge, Task},
         Catalog, TableId, Transaction, ViewId,
     },
 };
@@ -25,14 +24,56 @@ pub struct TabularExpiration {
     pub deletion_kind: DeleteKind,
 }
 
-// TODO: concurrent workers
+#[derive(Debug, Clone, Serialize, Deserialize, Default, ToSchema)]
+pub struct ExpirationQueueConfig {}
+
+impl QueueConfig for ExpirationQueueConfig {}
+
+#[derive(Debug, Clone)]
+pub struct ExpirationQueue<C: Catalog, A: Authorizer> {
+    pub(crate) catalog_state: C::State,
+    pub(crate) authz: A,
+    pub(crate) poll_interval: std::time::Duration,
+}
+
+#[async_trait::async_trait]
+impl<C, A> TaskQueue for ExpirationQueue<C, A>
+where
+    C: Catalog,
+    A: Authorizer,
+{
+    type Config = ExpirationQueueConfig;
+
+    async fn run(&self) {
+        tabular_expiration_task::<C, A>(
+            self.catalog_state.clone(),
+            self.authz.clone(),
+            self.poll_interval,
+        )
+        .await;
+    }
+}
+
 pub async fn tabular_expiration_task<C: Catalog, A: Authorizer>(
-    fetcher: async_channel::Receiver<Task>,
-    queues: Arc<dyn TaskQueue + Send + Sync + 'static>,
     catalog_state: C::State,
     authorizer: A,
+    poll_interval: std::time::Duration,
 ) {
-    while let Ok(expiration) = fetcher.recv().await {
+    loop {
+        let expiration =
+            match C::pick_new_task(QUEUE_NAME, DEFAULT_MAX_AGE, catalog_state.clone()).await {
+                Ok(expiration) => expiration,
+                Err(err) => {
+                    // TODO: add retry counter + exponential backoff
+                    tracing::error!("Failed to fetch expiration: {:?}", err);
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    continue;
+                }
+            };
+        let Some(expiration) = expiration else {
+            tokio::time::sleep(poll_interval).await;
+            continue;
+        };
         let state = match expiration.task_state::<TabularExpiration>() {
             Ok(state) => state,
             Err(err) => {
@@ -54,7 +95,6 @@ pub async fn tabular_expiration_task<C: Catalog, A: Authorizer>(
         );
 
         instrumented_expire::<C, A>(
-            queues.clone(),
             catalog_state.clone(),
             authorizer.clone(),
             tabular_id,
@@ -67,7 +107,6 @@ pub async fn tabular_expiration_task<C: Catalog, A: Authorizer>(
 }
 
 async fn instrumented_expire<C: Catalog, A: Authorizer>(
-    queue: Arc<dyn TaskQueue + Send + Sync + 'static>,
     catalog_state: C::State,
     authorizer: A,
     tabular_id: Uuid,
@@ -84,12 +123,17 @@ async fn instrumented_expire<C: Catalog, A: Authorizer>(
     .await
     {
         Ok(()) => {
-            queue.retrying_record_success(task, None).await;
             tracing::debug!("Successful {expiration:?}");
         }
-        Err(e) => {
-            tracing::error!("Failed to handle {expiration:?}: {e:?}");
-            queue.retrying_record_failure(task, &format!("{e:?}")).await;
+        Err(err) => {
+            tracing::error!("Failed to handle {expiration:?}: {err:?}");
+            super::record_error_with_catalog::<C>(
+                catalog_state.clone(),
+                &format!("Failed to expire tabular: '{:?}'", err.error),
+                5,
+                task.task_id,
+            )
+            .await;
         }
     };
 }
@@ -118,7 +162,7 @@ where
             let location = C::drop_table(table_id, true, trx.transaction())
                 .await
                 .map_err(|e| {
-                    tracing::error!(?e, "Failed to drop table: {}");
+                    tracing::error!(?e, "Failed to drop table: {}", e.error);
                     e.error
                 })?;
 
@@ -136,7 +180,7 @@ where
             let location = C::drop_view(view_id, true, trx.transaction())
                 .await
                 .map_err(|e| {
-                    tracing::error!(?e, "Failed to drop view: {e}");
+                    tracing::error!(?e, "Failed to drop view: {}", e.error);
                     e
                 })?;
             authorizer
@@ -166,6 +210,7 @@ where
         )
         .await?;
     }
+    C::retrying_record_task_success(task.task_id, None, trx.transaction()).await;
 
     trx.commit().await.map_err(|e| {
         tracing::error!("Failed to commit transaction: {:?}", e);

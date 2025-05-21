@@ -483,7 +483,7 @@ async fn try_recursive_drop<A: Authorizer, C: Catalog, S: SecretStore>(
             .delete_namespace(request_metadata, namespace_id)
             .await
             .inspect_err(|err| {
-                tracing::error!("Failed to delete namespace from authorizer: {}", err.error)
+                tracing::error!("Failed to delete namespace from authorizer: {}", err.error);
             })
             .ok();
         Ok(())

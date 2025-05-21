@@ -1,157 +1,205 @@
 use std::{collections::HashMap, fmt::Debug, ops::Deref, sync::Arc, time::Duration};
 
-use async_trait::async_trait;
 use chrono::Utc;
-use futures::{future::BoxFuture, FutureExt};
+use futures::future::BoxFuture;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use strum::EnumIter;
+use utoipa::ToSchema;
 use uuid::Uuid;
 
-use super::{authz::Authorizer, WarehouseId};
-use crate::{
-    service::{Catalog, SecretStore},
-    CONFIG,
+use super::{authz::Authorizer, Transaction, WarehouseId};
+use crate::service::{
+    task_queue::{
+        tabular_expiration_queue::{ExpirationQueue, ExpirationQueueConfig},
+        tabular_purge_queue::{PurgeQueue, PurgeQueueConfig},
+    },
+    Catalog, SecretStore,
 };
 
 pub mod tabular_expiration_queue;
 pub mod tabular_purge_queue;
 
-#[derive(Debug, Clone)]
-pub struct QueueConfig {
-    pub config: TaskQueueConfig,
-    pub channel_size: usize,
+pub trait QueueConfig {
+    fn max_age(&self) -> chrono::Duration {
+        DEFAULT_MAX_AGE
+    }
+    fn max_retries(&self) -> i32 {
+        5
+    }
+    fn num_workers(&self) -> usize {
+        2
+    }
 }
 
-pub type TaskQueueProducer = Arc<
-    dyn Fn(async_channel::Receiver<Task>) -> BoxFuture<'static, crate::api::Result<()>>
-        + Send
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "queue_name", rename_all = "kebab-case")]
+pub enum QueueConfigs {
+    TabularPurge(PurgeQueueConfig),
+    TabularExpiration(ExpirationQueueConfig),
+}
+
+impl QueueConfigs {
+    /// Converts the queue config to a `serde_json::Value`.
+    ///
+    /// # Errors
+    /// serialization to json fails
+    pub fn to_serde_value(&self) -> crate::api::Result<serde_json::Value> {
+        Ok(match self {
+            QueueConfigs::TabularPurge(cfg) => serde_json::to_value(cfg).map_err(|e| {
+                crate::api::ErrorModel::internal(
+                    format!("Failed to serialize queue config: {e}"),
+                    "QueueConfigSerializationError",
+                    Some(Box::new(e)),
+                )
+            }),
+            QueueConfigs::TabularExpiration(cfg) => serde_json::to_value(cfg).map_err(|e| {
+                crate::api::ErrorModel::internal(
+                    format!("Failed to serialize queue config: {e}"),
+                    "QueueConfigSerializationError",
+                    Some(Box::new(e)),
+                )
+            }),
+        }?)
+    }
+
+    /// Converts a `serde_json::Value` to a queue config.
+    ///
+    /// # Errors
+    /// Unknown queue name or deserialization error
+    pub fn from_serde_value(
+        queue_name: &str,
+        value: serde_json::Value,
+    ) -> crate::api::Result<Self> {
+        Ok(match queue_name {
+            tabular_purge_queue::QUEUE_NAME => {
+                QueueConfigs::TabularPurge(serde_json::from_value(value).map_err(|e| {
+                    crate::api::ErrorModel::internal(
+                        format!("Failed to deserialize queue config: {e}"),
+                        "QueueConfigDeserializationError",
+                        Some(Box::new(e)),
+                    )
+                })?)
+            }
+            tabular_expiration_queue::QUEUE_NAME => {
+                QueueConfigs::TabularExpiration(serde_json::from_value(value).map_err(|e| {
+                    crate::api::ErrorModel::internal(
+                        format!("Failed to deserialize queue config: {e}"),
+                        "QueueConfigDeserializationError",
+                        Some(Box::new(e)),
+                    )
+                })?)
+            }
+            _ => {
+                return Err(crate::api::ErrorModel::bad_request(
+                    "Invalid queue name",
+                    "InvalidQueueName",
+                    None,
+                )
+                .into());
+            }
+        })
+    }
+}
+
+impl QueueConfigs {
+    #[must_use]
+    pub fn queue_name(&self) -> &'static str {
+        match self {
+            QueueConfigs::TabularPurge(_) => tabular_purge_queue::QUEUE_NAME,
+            QueueConfigs::TabularExpiration(_) => tabular_expiration_queue::QUEUE_NAME,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+pub trait TaskQueue: Clone {
+    type Config: Send
         + Sync
-        + 'static,
->;
+        + 'static
+        + Clone
+        + DeserializeOwned
+        + Serialize
+        + ToSchema
+        + Default
+        + QueueConfig;
+    async fn run(&self);
+}
+
+pub type TaskQueueProducer = Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync + 'static>;
 
 pub const DEFAULT_CHANNEL_SIZE: usize = 1000;
 
 #[derive(Clone)]
 struct RegisteredQueue {
-    pub config: QueueConfig,
     pub queue_task: TaskQueueProducer,
+    num_workers: usize,
 }
 
 impl Debug for RegisteredQueue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RegisteredQueue")
-            .field("config", &self.config)
             .field("queue_task", &"Fn(...)")
             .finish()
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct TaskQueues {
-    queues: HashMap<&'static str, (async_channel::Sender<Task>, QueueConfig)>,
-    queue: Arc<dyn TaskQueue + Send + Sync + 'static>,
     registered_queues: HashMap<&'static str, RegisteredQueue>,
 }
 
 impl TaskQueues {
     #[must_use]
-    pub fn new(queue: Arc<dyn TaskQueue + Send + Sync + 'static>) -> Self {
+    pub fn new() -> Self {
         Self {
-            queues: HashMap::new(),
-            queue,
             registered_queues: HashMap::new(),
         }
     }
 
-    pub fn register_queue(
+    pub fn register_queue<T: TaskQueue + Sync + Send + 'static>(
         &mut self,
         queue_name: &'static str,
-        config: QueueConfig,
-        queue_task: TaskQueueProducer,
+        queue_task: T,
+        num_workers: usize,
     ) {
-        self.registered_queues
-            .insert(queue_name, RegisteredQueue { config, queue_task });
+        self.registered_queues.insert(
+            queue_name,
+            RegisteredQueue {
+                num_workers,
+                queue_task: Arc::new(move || {
+                    let clone = queue_task.clone();
+                    Box::pin(async move { clone.run().await })
+                }),
+            },
+        );
     }
 
-    async fn run(self, poll_interval: Duration) {
-        loop {
-            for (queue_name, (queue_tx, config)) in &self.queues {
-                match self
-                    .queue
-                    .pick_new_task(queue_name, config.config.max_age)
-                    .await
-                {
-                    Ok(Some(task)) => {
-                        if let Err(e) = tryhard::retry_fn(|| queue_tx.send(task.clone()))
-                            .retries(5)
-                            .fixed_backoff(Duration::from_millis(100))
-                            .await
-                        {
-                            // TODO: Do we even want to record_failure for this?
-                            self.queue
-                                .retrying_record_failure(
-                                    &task,
-                                    &format!("Failed to forward task to task queue handler {e}"),
-                                )
-                                .await;
-                        };
-                    }
-                    Ok(None) => {
-                        tracing::trace!("No task available for queue '{queue_name}'");
-                        // No task available
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to pick new task: '{}'", e.error);
-                    }
-                }
-            }
-            tokio::time::sleep(poll_interval).await;
-        }
-    }
-
-    async fn outer_run(mut self, poll_interval: Duration) -> anyhow::Result<()> {
+    async fn run(mut self) -> anyhow::Result<()> {
         let mut queue_tasks = vec![];
         let mut qs = HashMap::with_capacity(0);
         std::mem::swap(&mut self.registered_queues, &mut qs);
         for (
             name,
             RegisteredQueue {
-                config,
+                num_workers,
                 queue_task: task_fn,
             },
         ) in qs
         {
-            tracing::info!(
-                "Starting task queue {name} with {} workers",
-                config.config.num_workers
-            );
-            let (tx, rx) = async_channel::bounded(config.channel_size);
-            for n in 0..config.config.num_workers {
+            tracing::info!("Starting task queue {name} with {} workers", num_workers);
+            for n in 0..num_workers {
                 tracing::debug!("Starting task queue {name} worker {n}");
-                let task_fut = task_fn(rx.clone());
+                let task_fut = task_fn();
                 queue_tasks.push(tokio::task::spawn(task_fut));
             }
-            self.queues.insert(name, (tx, config));
         }
-        let feeder = tokio::task::spawn(self.run(poll_interval));
-        tokio::select! {
-            res = futures::future::select_all(queue_tasks) => {
-                let (res, index, _) = res;
-                if let Err(e) = res {
-                    tracing::error!("Task queue {index} panicked: {e}");
-                    return Err(anyhow::anyhow!("Task queue {index} panicked: {e}"));
-                }
-                tracing::error!("Task queue {index} exited unexpectedly");
-                return Err(anyhow::anyhow!("Task queue {index} exited unexpectedly"))
-            }
-            res = feeder => {
-                if let Err(e) = res {
-                    tracing::error!("Feeder task panicked: {e}");
-                    return Err(anyhow::anyhow!("Feeder task panicked: {e}"))
-                }
-            }
-        };
-        Ok(())
+        let (res, index, _) = futures::future::select_all(queue_tasks).await;
+        if let Err(e) = res {
+            tracing::error!("Task queue {index} panicked: {e}");
+            return Err(anyhow::anyhow!("Task queue {index} panicked: {e}"));
+        }
+        tracing::error!("Task queue {index} exited unexpectedly");
+        Err(anyhow::anyhow!("Task queue {index} exited unexpectedly"))
     }
 
     /// Spawns the built-in queues, currently `tabular_expiration_queue` and `tabular_purge_queue` alongside any
@@ -164,65 +212,73 @@ impl TaskQueues {
         catalog_state: C::State,
         secret_store: S,
         authorizer: A,
-        poll_interval: Duration,
+        poll_interval: std::time::Duration,
     ) -> Result<(), anyhow::Error>
     where
         C: Catalog,
         S: SecretStore,
         A: Authorizer,
     {
-        let queue = self.queue.clone();
+        // Arc::new(move || {
+        //     let catalog_state = catalog_state_clone.clone();
+        //     let authorizer = authorizer.clone();
+        //     async move {
+        //         tabular_expiration_queue::tabular_expiration_task::<C, A>(
+        //             catalog_state,
+        //             authorizer,
+        //             poll_interval,
+        //         )
+        //             .await;
+        //         Ok(())
+        //     }
+        //         .boxed()
+        // })
         let catalog_state_clone = catalog_state.clone();
         self.register_queue(
             tabular_expiration_queue::QUEUE_NAME,
-            QueueConfig {
-                config: CONFIG.queue_config.clone(),
-                channel_size: DEFAULT_CHANNEL_SIZE,
+            ExpirationQueue::<C, A> {
+                catalog_state: catalog_state.clone(),
+                authz: authorizer,
+                poll_interval,
             },
-            Arc::new(move |rx| {
-                let value = queue.clone();
-                let catalog_state = catalog_state_clone.clone();
-                let authorizer = authorizer.clone();
-                async move {
-                    tabular_expiration_queue::tabular_expiration_task::<C, A>(
-                        rx,
-                        value,
-                        catalog_state,
-                        authorizer,
-                    )
-                    .await;
-                    Ok(())
-                }
-                .boxed()
-            }),
+            2,
         );
-        let queue = self.queue.clone();
-        let catalog_state = catalog_state.clone();
+        // Arc::new(move || {
+        //     let catalog_state = catalog_state.clone();
+        //     let secret_store = secret_store.clone();
+        //     async move {
+        //         tabular_purge_queue::purge_task::<C, S>(
+        //             catalog_state,
+        //             secret_store,
+        //             poll_interval,
+        //         )
+        //             .await;
+        //         Ok(())
+        //     }
+        //         .boxed()
+        // })
         self.register_queue(
             tabular_purge_queue::QUEUE_NAME,
-            QueueConfig {
-                config: CONFIG.queue_config.clone(),
-                channel_size: DEFAULT_CHANNEL_SIZE,
+            PurgeQueue::<C, S> {
+                catalog_state: catalog_state_clone,
+                secret_state: secret_store.clone(),
+                poll_interval,
             },
-            Arc::new(move |rx| {
-                let value = queue.clone();
-                let catalog_state = catalog_state.clone();
-                let secret_store = secret_store.clone();
-                async move {
-                    tabular_purge_queue::purge_task::<C, S>(rx, value, catalog_state, secret_store)
-                        .await;
-                    Ok(())
-                }
-                .boxed()
-            }),
+            2,
         );
-        self.outer_run(poll_interval).await?;
+        self.run().await?;
         Ok(())
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Copy)]
 pub struct TaskId(Uuid);
+
+impl std::fmt::Display for TaskId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 impl From<Uuid> for TaskId {
     fn from(id: Uuid) -> Self {
@@ -260,7 +316,7 @@ pub struct TaskInput {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TaskMetadata {
     pub warehouse_id: WarehouseId,
-    pub parent_task_id: Option<Uuid>,
+    pub parent_task_id: Option<TaskId>,
     pub entity_id: EntityId,
     pub schedule_for: Option<chrono::DateTime<Utc>>,
 }
@@ -283,57 +339,18 @@ impl EntityId {
 pub struct Task {
     pub task_metadata: TaskMetadata,
     pub queue_name: String,
-    pub task_id: Uuid,
+    pub task_id: TaskId,
     pub status: TaskStatus,
     pub picked_up_at: Option<chrono::DateTime<Utc>>,
     pub attempt: i32,
     pub(crate) config: Option<serde_json::Value>,
     pub(crate) state: serde_json::Value,
 }
-/// `TaskQueue` is a trait which defines the interface available to a task worker.
-///
-/// It allows the worker to pick up a new task, record success or failure of a task. It also offers
-/// a few convenience methods for recording success or failure with retries.
-#[async_trait]
-pub trait TaskQueue: Debug {
-    async fn pick_new_task(
-        &self,
-        queue_name: &str,
-        max_age: chrono::Duration,
-    ) -> crate::api::Result<Option<Task>>;
-    async fn record_success(&self, id: Uuid, message: Option<&str>) -> crate::api::Result<()>;
-    async fn record_failure(
-        &self,
-        id: Uuid,
-        error_details: &str,
-        max_retries: i32,
-    ) -> crate::api::Result<()>;
 
-    async fn retrying_record_success(&self, task: &Task, details: Option<&str>) {
-        self.retrying_record_success_or_failure(task, Status::Success(details))
-            .await;
-    }
-
-    async fn retrying_record_failure(&self, task: &Task, details: &str) {
-        self.retrying_record_success_or_failure(task, Status::Failure(details))
-            .await;
-    }
-
-    async fn retrying_record_success_or_failure(&self, task: &Task, result: Status<'_>) {
-        let mut retry = 0;
-        while let Err(e) = match result {
-            Status::Success(details) => self.record_success(task.task_id, details).await,
-            Status::Failure(details) => self.record_failure(task.task_id, details).await,
-        } {
-            tracing::error!("Failed to record {}: {:?}", result, e);
-            tokio::time::sleep(Duration::from_secs(1 + retry)).await;
-            retry += 1;
-            if retry > 5 {
-                tracing::error!("Giving up trying to record {}.", result);
-                break;
-            }
-        }
-    }
+#[derive(Debug, Clone, Copy)]
+pub enum TaskCheckState {
+    Stop,
+    Continue,
 }
 
 impl Task {
@@ -381,13 +398,14 @@ impl Task {
 pub enum TaskStatus {
     Scheduled,
     Running,
+    ShouldStop,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 #[cfg_attr(feature = "sqlx-postgres", derive(sqlx::Type))]
 #[cfg_attr(
     feature = "sqlx-postgres",
-    sqlx(type_name = "task_intermediate_status", rename_all = "kebab-case")
+    sqlx(type_name = "task_final_status", rename_all = "kebab-case")
 )]
 pub enum TaskOutcome {
     Failed,
@@ -398,44 +416,69 @@ pub enum TaskOutcome {
 #[derive(Debug)]
 pub enum Status<'a> {
     Success(Option<&'a str>),
-    Failure(&'a str),
+    Failure(&'a str, i32),
 }
 
 impl std::fmt::Display for Status<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Status::Success(details) => write!(f, "success ({})", details.unwrap_or("")),
-            Status::Failure(details) => write!(f, "failure ({details})"),
+            Status::Failure(details, _) => write!(f, "failure ({details})"),
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct TaskQueueConfig {
-    pub max_retries: i32,
-    #[serde(
-        deserialize_with = "crate::config::seconds_to_duration",
-        serialize_with = "crate::config::duration_to_seconds"
-    )]
-    pub max_age: chrono::Duration,
-    #[serde(
-        deserialize_with = "crate::config::seconds_to_std_duration",
-        serialize_with = "crate::config::serialize_std_duration_as_ms"
-    )]
-    pub poll_interval: Duration,
-    pub num_workers: usize,
+pub(crate) async fn record_error_with_catalog<C: Catalog>(
+    catalog_state: C::State,
+    error: &str,
+    max_retries: i32,
+    task_id: TaskId,
+) {
+    let mut trx: C::Transaction = match Transaction::begin_write(catalog_state).await.map_err(|e| {
+        tracing::error!("Failed to start transaction: {:?}", e);
+        e
+    }) {
+        Ok(trx) => trx,
+        Err(e) => {
+            tracing::error!("Failed to start transaction: {:?}", e);
+            return;
+        }
+    };
+    C::retrying_record_task_failure(task_id, error, max_retries, trx.transaction()).await;
+    let _ = trx.commit().await.inspect_err(|e| {
+        tracing::error!("Failed to commit transaction: {:?}", e);
+    });
 }
 
-impl Default for TaskQueueConfig {
-    fn default() -> Self {
-        Self {
-            max_retries: 5,
-            max_age: valid_max_age(3600),
-            poll_interval: Duration::from_secs(10),
-            num_workers: 2,
-        }
-    }
-}
+// #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+// pub struct TaskQueueConfig {
+//     pub max_retries: i32,
+//     #[serde(
+//         deserialize_with = "crate::config::seconds_to_duration",
+//         serialize_with = "crate::config::duration_to_seconds"
+//     )]
+//     pub max_age: chrono::Duration,
+//     #[serde(
+//         deserialize_with = "crate::config::seconds_to_std_duration",
+//         serialize_with = "crate::config::serialize_std_duration_as_ms"
+//     )]
+//     pub poll_interval: Duration,
+//     pub num_workers: usize,
+// }
+
+pub const DEFAULT_MAX_AGE: chrono::Duration = valid_max_age(3600);
+pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(10);
+
+// impl Default for TaskQueueConfig {
+//     fn default() -> Self {
+//         Self {
+//             max_retries: 5,
+//             max_age: valid_max_age(3600),
+//             poll_interval: Duration::from_secs(10),
+//             num_workers: 2,
+//         }
+//     }
+// }
 
 const fn valid_max_age(num: i64) -> chrono::Duration {
     assert!(num > 0, "max_age must be greater than 0");
@@ -446,7 +489,6 @@ const fn valid_max_age(num: i64) -> chrono::Duration {
 
 #[cfg(test)]
 mod test {
-    use std::sync::Arc;
 
     use sqlx::PgPool;
     use tracing_test::traced_test;
@@ -457,17 +499,13 @@ mod test {
             management::v1::{DeleteKind, TabularType},
         },
         implementations::postgres::{
-            tabular::table::tests::initialize_table, task_queues::PgQueue,
-            warehouse::test::initialize_warehouse, CatalogState, PostgresCatalog,
-            PostgresTransaction,
+            tabular::table::tests::initialize_table, warehouse::test::initialize_warehouse,
+            CatalogState, PostgresCatalog, PostgresTransaction,
         },
         service::{
             authz::AllowAllAuthorizer,
             storage::TestProfile,
-            task_queue::{
-                tabular_expiration_queue::TabularExpiration, EntityId, TaskMetadata,
-                TaskQueueConfig,
-            },
+            task_queue::{tabular_expiration_queue::TabularExpiration, EntityId, TaskMetadata},
             Catalog, ListFlags, Transaction,
         },
     };
@@ -476,13 +514,9 @@ mod test {
     #[sqlx::test]
     #[traced_test]
     async fn test_queue_expiration_queue_task(pool: PgPool) {
-        let rw =
-            crate::implementations::postgres::ReadWrite::from_pools(pool.clone(), pool.clone());
-        let queue = Arc::new(PgQueue::new(rw).unwrap());
-
         let catalog_state = CatalogState::from_pools(pool.clone(), pool.clone());
 
-        let queues = crate::service::task_queue::TaskQueues::new(queue.clone());
+        let queues = crate::service::task_queue::TaskQueues::new();
 
         let secrets =
             crate::implementations::postgres::SecretsState::from_pools(pool.clone(), pool);

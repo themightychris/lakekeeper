@@ -3,8 +3,6 @@ mod drop_warehouse;
 mod endpoint_stats;
 mod stats;
 
-use std::sync::Arc;
-
 use iceberg::{NamespaceIdent, TableIdent};
 use iceberg_ext::catalog::rest::{
     CreateNamespaceRequest, CreateNamespaceResponse, LoadTableResult, LoadViewResult,
@@ -31,9 +29,7 @@ use crate::{
         ApiContext,
     },
     catalog::CatalogServer,
-    implementations::postgres::{
-        task_queues::PgQueue, CatalogState, PostgresCatalog, SecretsState,
-    },
+    implementations::postgres::{CatalogState, PostgresCatalog, SecretsState},
     request_metadata::RequestMetadata,
     service::{
         authz::Authorizer,
@@ -43,7 +39,7 @@ use crate::{
             s3::S3AccessKeyCredential, S3Credential, S3Flavor, S3Profile, StorageCredential,
             StorageProfile, TestProfile,
         },
-        task_queue::{TaskQueueConfig, TaskQueues},
+        task_queue::TaskQueues,
         Catalog, SecretStore, State, UserId,
     },
     WarehouseId, CONFIG,
@@ -289,18 +285,15 @@ pub(crate) fn random_request_metadata() -> RequestMetadata {
 
 pub(crate) fn spawn_drop_queues<T: Authorizer>(
     ctx: &ApiContext<State<T, PostgresCatalog, SecretsState>>,
-    queue_config: Option<TaskQueueConfig>,
+    poll_interval: Option<std::time::Duration>,
 ) {
-    let q_config = queue_config.unwrap_or_else(|| CONFIG.queue_config.clone());
     let ctx = ctx.clone();
 
-    let queues = TaskQueues::new(Arc::new(
-        PgQueue::new(ctx.v1_state.catalog.read_write.clone()).unwrap(),
-    ));
+    let queues = TaskQueues::new();
     tokio::task::spawn(queues.spawn_queues::<PostgresCatalog, _, T>(
         ctx.v1_state.catalog.clone(),
         ctx.v1_state.secrets.clone(),
         ctx.v1_state.authz.clone(),
-        q_config.poll_interval,
+        poll_interval.unwrap_or(CONFIG.task_poll_interval),
     ));
 }

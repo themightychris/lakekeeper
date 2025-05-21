@@ -5,9 +5,12 @@ alter table task
     rename column suspend_until to scheduled_for;
 
 alter table task
-    add column task_data   jsonb,
-    add column entity_type entity_type,
-    add column entity_id   uuid,
+    add column task_data         jsonb,
+    add column entity_type       entity_type,
+    add column entity_id         uuid,
+    add column last_heartbeat_at timestamptz,
+    -- we're moving old tasks into task_log and delete entries from task
+    drop constraint task_parent_task_id_fkey,
     alter column scheduled_for set default now(),
     alter column scheduled_for set not null;
 
@@ -44,6 +47,7 @@ create table task_config
     warehouse_id uuid references warehouse (warehouse_id) on delete cascade not null,
     queue_name   text                                                       not null,
     config       jsonb                                                      not null,
+    max_age      interval,
     -- TODO: add poll interval / max_age etc here?
     primary key (warehouse_id, queue_name)
 );
@@ -61,8 +65,8 @@ create table task_log
     status       task_final_status                                          not null,
     entity_id    uuid                                                       not null,
     entity_type  entity_type                                                not null,
-    started_at   timestamptz                                                not null,
-    duration     interval                                                   not null,
+    started_at   timestamptz,
+    duration     interval,
     message      text,
     primary key (task_id, attempt)
 );
@@ -120,7 +124,7 @@ SET status = 'scheduled'
 WHERE status = 'pending';
 
 drop type task_status;
-create type task_intermediate_status as enum ('running', 'scheduled');
+create type task_intermediate_status as enum ('running', 'scheduled', 'should-stop');
 alter table task
     alter column status type task_intermediate_status using status::task_intermediate_status;
 

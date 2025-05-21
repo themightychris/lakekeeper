@@ -6,9 +6,7 @@ use axum::routing::get;
 use iceberg_catalog::{
     api::router::{new_full_router, serve as service_serve, RouterArgs},
     implementations::{
-        postgres::{
-            endpoint_statistics::PostgresStatisticsSink, CatalogState, PostgresCatalog, ReadWrite,
-        },
+        postgres::{endpoint_statistics::PostgresStatisticsSink, CatalogState, PostgresCatalog},
         Secrets,
     },
     service::{
@@ -336,12 +334,7 @@ async fn serve_inner<A: Authorizer, N: Authenticator + 'static>(
     let hooks = EndpointHookCollection::new(vec![Arc::new(CloudEventsPublisher::new(
         cloud_events_tx.clone(),
     ))]);
-    let queue_interface = Arc::new(
-        iceberg_catalog::implementations::postgres::task_queues::PgQueue::new(
-            ReadWrite::from_pools(catalog_state.read_pool(), catalog_state.write_pool()),
-        )?,
-    );
-    let queues = TaskQueues::new(queue_interface.clone());
+    let queues = TaskQueues::new();
 
     let router = new_full_router::<PostgresCatalog, _, Secrets, _>(RouterArgs {
         authenticator: authenticator.clone(),
@@ -384,7 +377,7 @@ async fn serve_inner<A: Authorizer, N: Authenticator + 'static>(
     let stats_handle = tokio::task::spawn(tracker.run());
 
     tokio::select!(
-        _ = queues.spawn_queues::<PostgresCatalog, _, _>(catalog_state, secrets_state, authorizer, CONFIG.queue_config.poll_interval) => tracing::error!("Tabular queue task failed"),
+        _ = queues.spawn_queues::<PostgresCatalog, _, _>(catalog_state, secrets_state, authorizer, CONFIG.task_poll_interval) => tracing::error!("Tabular queue task failed"),
         err = service_serve(listener, router) => tracing::error!("Service failed: {err:?}"),
         _ = metrics_future => tracing::error!("Metrics server failed"),
     );

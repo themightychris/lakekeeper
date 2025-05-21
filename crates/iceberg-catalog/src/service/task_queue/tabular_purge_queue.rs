@@ -1,21 +1,17 @@
-use std::sync::Arc;
-
 use iceberg_ext::{
     catalog::rest::ErrorModel,
     configs::{Location, ParseFromStr},
 };
 use serde::{Deserialize, Serialize};
 use tracing::Instrument;
+use utoipa::ToSchema;
 use uuid::Uuid;
 
-use super::TaskMetadata;
+use super::{QueueConfig, TaskMetadata, TaskQueue, DEFAULT_MAX_AGE};
 use crate::{
     api::{management::v1::TabularType, Result},
     catalog::{io::remove_all, maybe_get_secret},
-    service::{
-        task_queue::{Task, TaskQueue},
-        Catalog, SecretStore, Transaction,
-    },
+    service::{task_queue::Task, Catalog, SecretStore, Transaction},
     WarehouseId,
 };
 
@@ -27,60 +23,93 @@ pub struct TabularPurge {
 
 pub const QUEUE_NAME: &str = "tabular_purge";
 
-// TODO: concurrent workers
-pub async fn purge_task<C: Catalog, S: SecretStore>(
-    fetcher: async_channel::Receiver<Task>,
-    queues: Arc<dyn TaskQueue + Send + Sync + 'static>,
-    catalog_state: C::State,
-    secret_state: S,
-) {
-    while let Ok(task) = fetcher.recv().await {
-        let state = match task.task_state::<TabularPurge>() {
-            Ok(state) => state,
-            Err(err) => {
-                tracing::error!("Failed to deserialize task state: {:?}", err);
-                // TODO: record fatal error
-                continue;
-            }
-        };
-        let span = tracing::debug_span!(
-            "tabular_purge",
-            location = %state.tabular_location,
-            warehouse_id = %task.task_metadata.warehouse_id,
-            tabular_type = %state.tabular_type,
-            queue_name = %task.queue_name,
-            task = ?task,
-        );
+#[derive(Debug, Clone, Serialize, Deserialize, Default, ToSchema)]
+pub struct PurgeQueueConfig {}
 
-        instrumented_purge::<_, C>(
-            queues.clone(),
-            catalog_state.clone(),
-            &secret_state,
-            &state,
-            &task,
-        )
-        .instrument(span.or_current())
-        .await;
+impl QueueConfig for PurgeQueueConfig {}
+
+#[derive(Debug, Clone)]
+pub struct PurgeQueue<C: Catalog, S: SecretStore> {
+    pub catalog_state: C::State,
+    pub secret_state: S,
+    pub poll_interval: std::time::Duration,
+}
+
+#[async_trait::async_trait]
+impl<C, S> TaskQueue for PurgeQueue<C, S>
+where
+    C: Catalog,
+    S: SecretStore,
+{
+    type Config = PurgeQueueConfig;
+
+    async fn run(&self) {
+        loop {
+            let task =
+                match C::pick_new_task(QUEUE_NAME, DEFAULT_MAX_AGE, self.catalog_state.clone())
+                    .await
+                {
+                    Ok(expiration) => expiration,
+                    Err(err) => {
+                        // TODO: add retry counter + exponential backoff
+                        tracing::error!("Failed to fetch purge: {:?}", err);
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        continue;
+                    }
+                };
+
+            let Some(task) = task else {
+                tokio::time::sleep(self.poll_interval).await;
+                continue;
+            };
+            let state = match task.task_state::<TabularPurge>() {
+                Ok(state) => state,
+                Err(err) => {
+                    tracing::error!("Failed to deserialize task state: {:?}", err);
+                    // TODO: record fatal error
+                    continue;
+                }
+            };
+            let config = match task.task_config::<Self::Config>() {
+                Ok(config) => config,
+                Err(err) => {
+                    tracing::error!("Failed to deserialize task config: {:?}", err);
+                    continue;
+                }
+            }
+            .unwrap_or_default();
+
+            let span = tracing::debug_span!(
+                "tabular_purge",
+                location = %state.tabular_location,
+                warehouse_id = %task.task_metadata.warehouse_id,
+                tabular_type = %state.tabular_type,
+                queue_name = %task.queue_name,
+                task = ?task,
+            );
+
+            instrumented_purge::<_, C>(
+                self.catalog_state.clone(),
+                &self.secret_state,
+                &state,
+                &task,
+                &config,
+            )
+            .instrument(span.or_current())
+            .await;
+        }
     }
 }
 
 async fn instrumented_purge<S: SecretStore, C: Catalog>(
-    queues: Arc<dyn TaskQueue + Send + Sync + 'static>,
     catalog_state: C::State,
     secret_state: &S,
     purge_task: &TabularPurge,
     task: &Task,
+    config: &PurgeQueueConfig,
 ) {
-    match purge::<C, S>(
-        purge_task,
-        &task.task_metadata,
-        secret_state,
-        catalog_state.clone(),
-    )
-    .await
-    {
+    match purge::<C, S>(purge_task, task, secret_state, catalog_state.clone()).await {
         Ok(()) => {
-            queues.retrying_record_success(task, None).await;
             tracing::info!(
                 "Successfully cleaned up tabular at location {}",
                 purge_task.tabular_location
@@ -92,9 +121,13 @@ async fn instrumented_purge<S: SecretStore, C: Catalog>(
                 purge_task.tabular_location,
                 err.error
             );
-            queues
-                .retrying_record_failure(task, &err.error.to_string())
-                .await;
+            super::record_error_with_catalog::<C>(
+                catalog_state.clone(),
+                &format!("Failed to purge tabular: '{:?}'", err.error),
+                config.max_retries(),
+                task.task_id,
+            )
+            .await;
         }
     };
 }
@@ -104,12 +137,22 @@ async fn purge<C, S>(
         tabular_location,
         tabular_type: _,
     }: &TabularPurge,
-    TaskMetadata {
-        entity_id: _,
-        warehouse_id,
-        parent_task_id: _,
-        schedule_for: _,
-    }: &TaskMetadata,
+    Task {
+        task_metadata:
+            TaskMetadata {
+                entity_id: _,
+                warehouse_id,
+                parent_task_id: _,
+                schedule_for: _,
+            },
+        queue_name: _,
+        task_id,
+        status: _,
+        picked_up_at: _,
+        attempt: _,
+        config: _,
+        state: _,
+    }: &Task,
     secret_state: &S,
     catalog_state: C::State,
 ) -> Result<()>
@@ -130,7 +173,7 @@ where
             tracing::error!("Failed to get warehouse: {:?}", e);
             e
         })?;
-
+    C::retrying_record_task_success(*task_id, None, trx.transaction()).await;
     trx.commit().await.map_err(|e| {
         tracing::error!("Failed to commit transaction: {:?}", e);
         e

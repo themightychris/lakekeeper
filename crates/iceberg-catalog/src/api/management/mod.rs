@@ -54,7 +54,9 @@ pub mod v1 {
             management::v1::{
                 project::{EndpointStatisticsResponse, GetEndpointStatisticsRequest},
                 user::{ListUsersQuery, ListUsersResponse},
-                warehouse::UndropTabularsRequest,
+                warehouse::{
+                    GetTaskQueueConfigResponse, SetTaskQueueConfigRequest, UndropTabularsRequest,
+                },
             },
             ApiContext, IcebergErrorResponse, Result,
         },
@@ -1451,6 +1453,38 @@ pub mod v1 {
         .await
     }
 
+    // TODO: utoipa stuff
+    async fn set_task_queue_config<C: Catalog, A: Authorizer + Clone, S: SecretStore>(
+        Path(warehouse_id): Path<uuid::Uuid>,
+        Extension(metadata): Extension<RequestMetadata>,
+        AxumState(api_context): AxumState<ApiContext<State<A, C, S>>>,
+        Json(request): Json<SetTaskQueueConfigRequest>,
+    ) -> Result<StatusCode> {
+        ApiServer::<C, A, S>::set_task_queue_config(
+            warehouse_id.into(),
+            request,
+            api_context,
+            metadata,
+        )
+        .await?;
+        Ok(StatusCode::NO_CONTENT)
+    }
+
+    // TODO: utoipa stuff
+    async fn get_task_queue_config<C: Catalog, A: Authorizer + Clone, S: SecretStore>(
+        Path((warehouse_id, queue_name)): Path<(uuid::Uuid, String)>,
+        Extension(metadata): Extension<RequestMetadata>,
+        AxumState(api_context): AxumState<ApiContext<State<A, C, S>>>,
+    ) -> Result<GetTaskQueueConfigResponse> {
+        ApiServer::<C, A, S>::get_task_queue_config(
+            warehouse_id.into(),
+            &queue_name,
+            api_context,
+            metadata,
+        )
+        .await
+    }
+
     #[derive(Debug, Serialize, utoipa::ToSchema)]
     #[serde(rename_all = "kebab-case")]
     pub struct ListDeletedTabularsResponse {
@@ -1521,11 +1555,12 @@ pub mod v1 {
     #[must_use]
     pub fn api_doc<A: Authorizer>() -> utoipa::openapi::OpenApi {
         let mut doc = ManagementApiDoc::openapi();
+
         doc.merge(A::api_doc());
         doc
     }
-
     impl<C: Catalog, A: Authorizer, S: SecretStore> ApiServer<C, A, S> {
+        #[allow(clippy::too_many_lines)]
         pub fn new_v1_router(authorizer: &A) -> Router<ApiContext<State<A, C, S>>> {
             Router::new()
                 // Server
@@ -1637,6 +1672,14 @@ pub mod v1 {
                 .route(
                     "/warehouse/{warehouse_id}/protection",
                     post(set_warehouse_protection),
+                )
+                .route(
+                    "/warehouse/{warehouse_id}/task-queue/config",
+                    post(set_task_queue_config),
+                )
+                .route(
+                    "/warehouse/{warehouse_id}/task-queue/{queue_name}/config",
+                    get(get_task_queue_config),
                 )
                 .merge(authorizer.new_router())
         }

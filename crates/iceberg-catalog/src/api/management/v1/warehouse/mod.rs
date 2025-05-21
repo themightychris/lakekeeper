@@ -31,7 +31,7 @@ use crate::{
     service::{
         authz::{Authorizer, CatalogProjectAction, CatalogWarehouseAction},
         secrets::SecretStore,
-        task_queue::TaskFilter,
+        task_queue::{QueueConfigs, TaskFilter},
         Catalog, ListFlags, NamespaceId, State, TableId, TabularId, Transaction,
     },
     ProjectId, WarehouseId, DEFAULT_PROJECT_ID,
@@ -810,12 +810,7 @@ pub trait Service<C: Catalog, A: Authorizer, S: SecretStore> {
         let undrop_tabular_responses =
             C::undrop_tabulars(&tabs, warehouse_id, transaction.transaction()).await?;
         C::cancel_tabular_expiration(
-            TaskFilter::TaskIds(
-                undrop_tabular_responses
-                    .iter()
-                    .map(|r| r.task_id.clone())
-                    .collect(),
-            ),
+            TaskFilter::TaskIds(undrop_tabular_responses.iter().map(|r| r.task_id).collect()),
             transaction.transaction(),
         )
         .await?;
@@ -952,6 +947,56 @@ pub trait Service<C: Catalog, A: Authorizer, S: SecretStore> {
             tabulars,
             next_page_token,
         })
+    }
+
+    async fn set_task_queue_config(
+        warehouse_id: WarehouseId,
+        request: SetTaskQueueConfigRequest,
+        context: ApiContext<State<A, C, S>>,
+        _request_metadata: RequestMetadata,
+    ) -> Result<()> {
+        // TODO: authz
+        let mut transaction = C::Transaction::begin_write(context.v1_state.catalog).await?;
+        C::set_task_queue_config(warehouse_id, request, transaction.transaction()).await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    async fn get_task_queue_config(
+        warehouse_id: WarehouseId,
+        queue_name: &str,
+        context: ApiContext<State<A, C, S>>,
+        _request_metadata: RequestMetadata,
+    ) -> Result<GetTaskQueueConfigResponse> {
+        // TODO: authz
+        let mut transaction = C::Transaction::begin_read(context.v1_state.catalog).await?;
+        let config = C::get_task_queue_config(warehouse_id, queue_name, transaction.transaction())
+            .await?
+            .ok_or(ErrorModel::not_found(
+                "Task queue config not found",
+                "TaskQueueConfigNotFound",
+                None,
+            ))?;
+        transaction.commit().await?;
+        Ok(config)
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct SetTaskQueueConfigRequest {
+    pub queue_config: QueueConfigs,
+    pub max_age_seconds: Option<i64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct GetTaskQueueConfigResponse {
+    pub queue_config: QueueConfigs,
+    pub max_age_seconds: Option<i64>,
+}
+
+impl axum::response::IntoResponse for GetTaskQueueConfigResponse {
+    fn into_response(self) -> axum::http::Response<axum::body::Body> {
+        (http::StatusCode::OK, axum::Json(self)).into_response()
     }
 }
 
