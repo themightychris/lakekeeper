@@ -699,9 +699,12 @@ impl Catalog for super::PostgresCatalog {
         tasks: Vec<TaskInput>,
         transaction: <Self::Transaction as Transaction<Self::State>>::Transaction<'_>,
     ) -> Result<Vec<TaskId>> {
+        if tasks.len() == 0 {
+            return Ok(vec![]);
+        }
         let queued = queue_task_batch(transaction, queue_name, tasks).await?;
 
-        tracing::debug!("Queued {} tasks", queued.len());
+        tracing::trace!("Queued {} tasks", queued.len());
 
         Ok(queued.into_iter().map(|t| t.task_id.into()).collect())
     }

@@ -1,9 +1,9 @@
-use std::{collections::HashMap, fmt::Debug, ops::Deref, sync::Arc, time::Duration};
-
 use async_trait::async_trait;
 use chrono::Utc;
 use futures::{future::BoxFuture, FutureExt};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::time::Duration;
+use std::{collections::HashMap, fmt::Debug, ops::Deref, sync::Arc};
 use strum::EnumIter;
 use uuid::Uuid;
 
@@ -48,7 +48,7 @@ impl Debug for RegisteredQueue {
 
 #[derive(Clone, Debug)]
 pub struct TaskQueues {
-    queues: HashMap<&'static str, async_channel::Sender<Task>>,
+    queues: HashMap<&'static str, (async_channel::Sender<Task>, QueueConfig)>,
     queue: Arc<dyn TaskQueue + Send + Sync + 'static>,
     registered_queues: HashMap<&'static str, RegisteredQueue>,
 }
@@ -75,8 +75,12 @@ impl TaskQueues {
 
     async fn run(self, poll_interval: Duration) {
         loop {
-            for (queue_name, queue_tx) in &self.queues {
-                match self.queue.pick_new_task(queue_name).await {
+            for (queue_name, (queue_tx, config)) in &self.queues {
+                match self
+                    .queue
+                    .pick_new_task(queue_name, config.config.max_age)
+                    .await
+                {
                     Ok(Some(task)) => {
                         if let Err(e) = tryhard::retry_fn(|| queue_tx.send(task.clone()))
                             .retries(5)
@@ -127,7 +131,7 @@ impl TaskQueues {
                 let task_fut = task_fn(rx.clone());
                 queue_tasks.push(tokio::task::spawn(task_fut));
             }
-            self.queues.insert(name, tx);
+            self.queues.insert(name, (tx, config));
         }
         let feeder = tokio::task::spawn(self.run(poll_interval));
         tokio::select! {
@@ -258,7 +262,7 @@ pub struct TaskMetadata {
     pub warehouse_id: WarehouseId,
     pub parent_task_id: Option<Uuid>,
     pub entity_id: EntityId,
-    pub suspend_until: Option<chrono::DateTime<Utc>>,
+    pub schedule_for: Option<chrono::DateTime<Utc>>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq)]
@@ -292,9 +296,18 @@ pub struct Task {
 /// a few convenience methods for recording success or failure with retries.
 #[async_trait]
 pub trait TaskQueue: Debug {
-    async fn pick_new_task(&self, queue_name: &str) -> crate::api::Result<Option<Task>>;
+    async fn pick_new_task(
+        &self,
+        queue_name: &str,
+        max_age: chrono::Duration,
+    ) -> crate::api::Result<Option<Task>>;
     async fn record_success(&self, id: Uuid, message: Option<&str>) -> crate::api::Result<()>;
-    async fn record_failure(&self, id: Uuid, error_details: &str) -> crate::api::Result<()>;
+    async fn record_failure(
+        &self,
+        id: Uuid,
+        error_details: &str,
+        max_retries: i32,
+    ) -> crate::api::Result<()>;
 
     async fn retrying_record_success(&self, task: &Task, details: Option<&str>) {
         self.retrying_record_success_or_failure(task, Status::Success(details))
@@ -366,8 +379,20 @@ impl Task {
     sqlx(type_name = "task_intermediate_status", rename_all = "kebab-case")
 )]
 pub enum TaskStatus {
-    Pending,
+    Scheduled,
     Running,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq)]
+#[cfg_attr(feature = "sqlx-postgres", derive(sqlx::Type))]
+#[cfg_attr(
+    feature = "sqlx-postgres",
+    sqlx(type_name = "task_intermediate_status", rename_all = "kebab-case")
+)]
+pub enum TaskOutcome {
+    Failed,
+    Cancelled,
+    Completed,
 }
 
 #[derive(Debug)]
@@ -451,16 +476,9 @@ mod test {
     #[sqlx::test]
     #[traced_test]
     async fn test_queue_expiration_queue_task(pool: PgPool) {
-        let config = TaskQueueConfig {
-            max_retries: 5,
-            max_age: chrono::Duration::seconds(3600),
-            poll_interval: std::time::Duration::from_millis(100),
-            num_workers: 1,
-        };
-
         let rw =
             crate::implementations::postgres::ReadWrite::from_pools(pool.clone(), pool.clone());
-        let queue = Arc::new(PgQueue::from_config(rw, config).unwrap());
+        let queue = Arc::new(PgQueue::new(rw).unwrap());
 
         let catalog_state = CatalogState::from_pools(pool.clone(), pool.clone());
 
@@ -524,7 +542,7 @@ mod test {
                 warehouse_id: warehouse,
                 entity_id: EntityId::Tabular(tab.table_id.0),
                 parent_task_id: None,
-                suspend_until: Some(chrono::Utc::now() + chrono::Duration::seconds(1)),
+                schedule_for: Some(chrono::Utc::now() + chrono::Duration::seconds(1)),
             },
             TabularExpiration {
                 tabular_type: TabularType::Table,

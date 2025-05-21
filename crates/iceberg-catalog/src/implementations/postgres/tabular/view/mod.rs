@@ -807,7 +807,7 @@ pub(crate) mod tests {
                 entity_id: EntityId::Tabular(created_meta.uuid()),
                 warehouse_id,
                 parent_task_id: None,
-                suspend_until: Some(chrono::Utc::now() + chrono::Duration::seconds(1)),
+                schedule_for: Some(chrono::Utc::now() + chrono::Duration::seconds(1)),
             },
             TabularExpiration {
                 tabular_type: crate::api::management::v1::TabularType::Table,

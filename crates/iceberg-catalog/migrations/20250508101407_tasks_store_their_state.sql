@@ -1,11 +1,15 @@
 create type entity_type as enum ('tabular');
-create type task_final_status as enum ('failure', 'cancellation', 'success');
+create type task_final_status as enum ('failed', 'cancelled', 'completed');
+
+alter table task
+    rename column suspend_until to scheduled_for;
 
 alter table task
     add column task_data   jsonb,
     add column entity_type entity_type,
-    add column entity_id   uuid
-;
+    add column entity_id   uuid,
+    alter column scheduled_for set default now(),
+    alter column scheduled_for set not null;
 
 update task
 set task_data   = jsonb_build_object(
@@ -40,9 +44,12 @@ create table task_config
     warehouse_id uuid references warehouse (warehouse_id) on delete cascade not null,
     queue_name   text                                                       not null,
     config       jsonb                                                      not null,
+    -- TODO: add poll interval / max_age etc here?
     primary key (warehouse_id, queue_name)
 );
 
+call add_time_columns('task_config');
+select trigger_updated_at('task_config');
 
 create table task_log
 (
@@ -54,34 +61,39 @@ create table task_log
     status       task_final_status                                          not null,
     entity_id    uuid                                                       not null,
     entity_type  entity_type                                                not null,
+    started_at   timestamptz                                                not null,
+    duration     interval                                                   not null,
     message      text,
     primary key (task_id, attempt)
 );
 
 call add_time_columns('task_log');
-select trigger_updated_at('task_log');
 
 create index if not exists task_log_warehouse_id_idx
     on task_log (warehouse_id);
-create index if not exists task_log_warehouse_id_entity_id_idx
-    on task_log (warehouse_id, entity_id);
+create index if not exists task_log_warehouse_id_entity_id_entity_type_idx
+    on task_log (warehouse_id, entity_id, entity_type);
 
 
 insert into task_log (task_id, warehouse_id, attempt, queue_name, task_data, status, message, entity_id,
-                      entity_type)
+                      entity_type, started_at, duration)
 select task.task_id,
        task.warehouse_id,
        task.attempt,
        task.queue_name,
        task.task_data,
        CASE
-           when task.status = 'cancelled' then 'cancellation'::task_final_status
-           when task.status = 'failed' then 'failure'::task_final_status
-           when task.status = 'done' then 'success'::task_final_status
+           when task.status = 'cancelled' then 'cancelled'::task_final_status
+           when task.status = 'failed' then 'failed'::task_final_status
+           when task.status = 'done' then 'completed'::task_final_status
            END,
        task.last_error_details,
        task.entity_id,
-       task.entity_type
+       task.entity_type,
+       task.picked_up_at,
+       CASE
+           WHEN task.updated_at IS NOT NULL THEN age(task.picked_up_at, task.updated_at)
+           ELSE '0' END
 from task
 where task.status != 'running'
   AND task.status != 'pending';
@@ -97,16 +109,22 @@ drop index if exists task_warehouse_queue_name_idx;
 alter table task
     alter column status type text,
     drop constraint unique_idempotency_key,
-    add constraint unique_entity_type_entity_id_queue_name unique (entity_type, entity_id, queue_name),
     drop column idempotency_key,
     drop column last_error_details;
 
+create unique index if not exists task_warehouse_id_entity_type_entity_id_queue_name_idx
+    on task (warehouse_id, entity_type, entity_id, queue_name);
+
+UPDATE task
+SET status = 'scheduled'
+WHERE status = 'pending';
+
 drop type task_status;
-create type task_intermediate_status as enum ('running', 'pending');
+create type task_intermediate_status as enum ('running', 'scheduled');
 alter table task
     alter column status type task_intermediate_status using status::task_intermediate_status;
 
 create index task_queue_name_status_idx on task (queue_name, status);
 create index task_warehouse_queue_name_idx on task (warehouse_id, queue_name);
 create index if not exists task_entity_type_entity_id_idx
-    on task (entity_type, entity_id);
+    on task (warehouse_id, entity_type, entity_id);

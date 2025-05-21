@@ -460,7 +460,7 @@ async fn try_recursive_drop<A: Authorizer, C: Catalog, S: SecretStore>(
                         warehouse_id,
                         entity_id: EntityId::Tabular(tabular_id),
                         parent_task_id: None,
-                        suspend_until: None,
+                        schedule_for: None,
                     },
                     TabularPurge {
                         tabular_location,
@@ -474,11 +474,18 @@ async fn try_recursive_drop<A: Authorizer, C: Catalog, S: SecretStore>(
         // commit before starting the purge tasks so that we cannot end in the situation where
         // data is deleted but the transaction is not committed, meaning dangling pointers.
         t.commit().await?;
+
+        // namespace is gone from catalog, we should not return an error to the client if we fail to
+        // delete it from the authorizer.
         state
             .v1_state
             .authz
             .delete_namespace(request_metadata, namespace_id)
-            .await?;
+            .await
+            .inspect_err(|err| {
+                tracing::error!("Failed to delete namespace from authorizer: {}", err.error)
+            })
+            .ok();
         Ok(())
     } else {
         Err(ErrorModel::bad_request(

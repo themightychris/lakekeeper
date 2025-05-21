@@ -118,11 +118,17 @@ where
             let location = C::drop_table(table_id, true, trx.transaction())
                 .await
                 .map_err(|e| {
-                    tracing::error!("Failed to drop table: {:?}", e);
-                    e
+                    tracing::error!(?e, "Failed to drop table: {}");
+                    e.error
                 })?;
 
-            authorizer.delete_table(table_id).await?;
+            authorizer
+                .delete_table(table_id)
+                .await
+                .inspect_err(|e| {
+                    tracing::error!(?e, "Failed to delete table from authorizer: {}", e.error);
+                })
+                .ok();
             location
         }
         TabularType::View => {
@@ -130,10 +136,16 @@ where
             let location = C::drop_view(view_id, true, trx.transaction())
                 .await
                 .map_err(|e| {
-                    tracing::error!("Failed to drop table: {:?}", e);
+                    tracing::error!(?e, "Failed to drop view: {e}");
                     e
                 })?;
-            authorizer.delete_view(view_id).await?;
+            authorizer
+                .delete_view(view_id)
+                .await
+                .inspect_err(|e| {
+                    tracing::error!(?e, "Failed to delete view from authorizer: {}", e.error);
+                })
+                .ok();
             location
         }
     };
@@ -144,7 +156,7 @@ where
                 entity_id: task.task_metadata.entity_id,
                 warehouse_id: task.task_metadata.warehouse_id,
                 parent_task_id: Some(task.task_id),
-                suspend_until: None,
+                schedule_for: None,
             },
             TabularPurge {
                 tabular_type: expiration.tabular_type,

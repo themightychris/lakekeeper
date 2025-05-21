@@ -699,7 +699,7 @@ impl<C: Catalog, A: Authorizer + Clone, S: SecretStore>
                             warehouse_id,
                             entity_id: EntityId::Tabular(*table_id),
                             parent_task_id: None,
-                            suspend_until: None,
+                            schedule_for: None,
                         },
                         TabularPurge {
                             tabular_location: location,
@@ -712,7 +712,13 @@ impl<C: Catalog, A: Authorizer + Clone, S: SecretStore>
                     tracing::debug!("Queued purge task for dropped table '{table_id}'.");
                 }
                 t.commit().await?;
-                authorizer.delete_table(table_id).await?;
+                authorizer
+                    .delete_table(table_id)
+                    .await
+                    .inspect_err(|e| {
+                        tracing::error!(?e, "Failed to delete table from authorizer: {}", e.error);
+                    })
+                    .ok();
             }
             TabularDeleteProfile::Soft { expiration_seconds } => {
                 let _ = C::queue_tabular_expiration(
@@ -720,7 +726,7 @@ impl<C: Catalog, A: Authorizer + Clone, S: SecretStore>
                         entity_id: EntityId::Tabular(*table_id),
                         warehouse_id,
                         parent_task_id: None,
-                        suspend_until: Some(chrono::Utc::now() + expiration_seconds),
+                        schedule_for: Some(chrono::Utc::now() + expiration_seconds),
                     },
                     TabularExpiration {
                         tabular_type: TabularType::Table,

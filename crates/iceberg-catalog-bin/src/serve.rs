@@ -337,9 +337,8 @@ async fn serve_inner<A: Authorizer, N: Authenticator + 'static>(
         cloud_events_tx.clone(),
     ))]);
     let queue_interface = Arc::new(
-        iceberg_catalog::implementations::postgres::task_queues::PgQueue::from_config(
+        iceberg_catalog::implementations::postgres::task_queues::PgQueue::new(
             ReadWrite::from_pools(catalog_state.read_pool(), catalog_state.write_pool()),
-            CONFIG.queue_config.clone(),
         )?,
     );
     let queues = TaskQueues::new(queue_interface.clone());

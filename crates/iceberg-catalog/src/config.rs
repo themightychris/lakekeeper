@@ -743,6 +743,7 @@ mod test {
 
     #[allow(unused_imports)]
     use super::*;
+    #[cfg(feature = "kafka")]
     use crate::service::event_publisher::kafka::KafkaConfig;
 
     #[test]

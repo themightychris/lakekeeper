@@ -73,7 +73,7 @@ pub(crate) async fn drop_view<C: Catalog, A: Authorizer + Clone, S: SecretStore>
                         warehouse_id,
                         entity_id: EntityId::Tabular(*view_id),
                         parent_task_id: None,
-                        suspend_until: None,
+                        schedule_for: None,
                     },
                     TabularPurge {
                         tabular_location: location,
@@ -86,7 +86,13 @@ pub(crate) async fn drop_view<C: Catalog, A: Authorizer + Clone, S: SecretStore>
             }
             t.commit().await?;
 
-            authorizer.delete_view(view_id).await?;
+            authorizer
+                .delete_view(view_id)
+                .await
+                .inspect_err(|e| {
+                    tracing::error!(?e, "Failed to delete view from authorizer: {}", e.error);
+                })
+                .ok();
         }
         TabularDeleteProfile::Soft { expiration_seconds } => {
             let _ = C::queue_tabular_expiration(
@@ -94,7 +100,7 @@ pub(crate) async fn drop_view<C: Catalog, A: Authorizer + Clone, S: SecretStore>
                     entity_id: EntityId::Tabular(*view_id),
                     warehouse_id,
                     parent_task_id: None,
-                    suspend_until: Some(chrono::Utc::now() + expiration_seconds),
+                    schedule_for: Some(chrono::Utc::now() + expiration_seconds),
                 },
                 TabularExpiration {
                     tabular_type: TabularType::View,

@@ -108,7 +108,7 @@ async fn purge<C, S>(
         entity_id: _,
         warehouse_id,
         parent_task_id: _,
-        suspend_until: _,
+        schedule_for: _,
     }: &TaskMetadata,
     secret_state: &S,
     catalog_state: C::State,

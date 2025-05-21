@@ -1,19 +1,17 @@
 use chrono::Utc;
-use iceberg_ext::catalog::rest::IcebergErrorResponse;
+use iceberg_ext::catalog::rest::{ErrorModel, IcebergErrorResponse};
 use itertools::Itertools;
-use sqlx::{PgConnection, PgPool};
+use sqlx::{postgres::types::PgInterval, PgConnection, PgPool};
 use uuid::Uuid;
 
 use crate::{
     implementations::postgres::{dbutils::DBErrorHandler, ReadWrite},
-    service::task_queue::{Task, TaskFilter, TaskQueue, TaskQueueConfig, TaskStatus},
+    service::task_queue::{Task, TaskFilter, TaskQueue, TaskStatus},
 };
 
 #[derive(Debug, Clone)]
 pub struct PgQueue {
     pub read_write: ReadWrite,
-    pub config: TaskQueueConfig,
-    pub max_age: sqlx::postgres::types::PgInterval,
 }
 
 impl PgQueue {
@@ -21,46 +19,37 @@ impl PgQueue {
     ///
     /// # Errors
     /// Returns an error if the `max_age` duration in the `TaskQueueConfig` is invalid.
-    pub fn from_config(read_write: ReadWrite, config: TaskQueueConfig) -> anyhow::Result<Self> {
-        let microseconds = config
-            .max_age
-            .num_microseconds()
-            .ok_or(anyhow::anyhow!("Invalid max age duration for task queues."))?;
-        Ok(Self {
-            read_write,
-            config,
-            max_age: sqlx::postgres::types::PgInterval {
-                months: 0,
-                days: 0,
-                microseconds,
-            },
-        })
+    pub fn new(read_write: ReadWrite) -> anyhow::Result<Self> {
+        Ok(Self { read_write })
     }
 }
 
 #[async_trait::async_trait]
 impl TaskQueue for PgQueue {
-    async fn pick_new_task(&self, queue_name: &str) -> crate::api::Result<Option<Task>> {
-        pick_task(&self.read_write.write_pool, queue_name, &self.max_age).await
+    async fn pick_new_task(
+        &self,
+        queue_name: &str,
+        max_age: chrono::Duration,
+    ) -> crate::api::Result<Option<Task>> {
+        pick_task(&self.read_write.write_pool, queue_name, max_age).await
     }
 
     async fn record_success(&self, id: Uuid, message: Option<&str>) -> crate::api::Result<()> {
         record_success(id, &self.read_write.write_pool, message).await
     }
 
-    async fn record_failure(&self, id: Uuid, error_details: &str) -> crate::api::Result<()> {
-        record_failure(
-            &self.read_write.write_pool,
-            id,
-            self.config.max_retries,
-            error_details,
-        )
-        .await
+    async fn record_failure(
+        &self,
+        id: Uuid,
+        error_details: &str,
+        max_retries: i32,
+    ) -> crate::api::Result<()> {
+        record_failure(&self.read_write.write_pool, id, max_retries, error_details).await
     }
 }
 
 #[derive(Debug)]
-pub struct InsertResult {
+struct InsertResult {
     pub task_id: Uuid,
     pub queue_name: String,
     pub entity_id: EntityId,
@@ -68,8 +57,14 @@ pub struct InsertResult {
 
 #[derive(Debug, sqlx::Type, Clone, Copy)]
 #[sqlx(type_name = "entity_type", rename_all = "kebab-case")]
-pub enum EntityType {
+enum EntityType {
     Tabular,
+}
+
+impl EntityId {
+    pub fn entity_type(&self) -> EntityType {
+        (*self).into()
+    }
 }
 
 impl From<EntityId> for EntityType {
@@ -88,7 +83,7 @@ pub(crate) async fn queue_task_batch(
     let mut task_ids = Vec::with_capacity(tasks.len());
     let mut parent_task_ids = Vec::with_capacity(tasks.len());
     let mut warehouse_idents = Vec::with_capacity(tasks.len());
-    let mut suspend_untils = Vec::with_capacity(tasks.len());
+    let mut scheduled_fors = Vec::with_capacity(tasks.len());
     let mut entity_ids = Vec::with_capacity(tasks.len());
     let mut entity_types = Vec::with_capacity(tasks.len());
     let mut states = Vec::with_capacity(tasks.len());
@@ -97,7 +92,7 @@ pub(crate) async fn queue_task_batch(
             TaskMetadata {
                 parent_task_id,
                 warehouse_id,
-                suspend_until,
+                schedule_for,
                 entity_id,
             },
         payload,
@@ -106,7 +101,7 @@ pub(crate) async fn queue_task_batch(
         task_ids.push(Uuid::now_v7());
         parent_task_ids.push(parent_task_id);
         warehouse_idents.push(*warehouse_id);
-        suspend_untils.push(suspend_until);
+        scheduled_fors.push(schedule_for);
         states.push(payload);
         entity_types.push(EntityType::from(entity_id));
         entity_ids.push(entity_id.to_uuid());
@@ -119,7 +114,7 @@ pub(crate) async fn queue_task_batch(
                 $2 as queue_name,
                 unnest($3::uuid[]) as parent_task_id,
                 unnest($4::uuid[]) as warehouse_id,
-                unnest($5::timestamptz[]) as suspend_until,
+                unnest($5::timestamptz[]) as scheduled_for,
                 unnest($6::jsonb[]) as payload,
                 unnest($7::uuid[]) as entity_ids,
                 unnest($8::entity_type[]) as entity_types
@@ -130,34 +125,35 @@ pub(crate) async fn queue_task_batch(
                 status,
                 parent_task_id,
                 warehouse_id,
-                suspend_until,
+                scheduled_for,
                 task_data,
                 entity_id,
                 entity_type)
         SELECT
             i.task_id,
             i.queue_name,
-            'pending'::task_intermediate_status,
+            $9,
             i.parent_task_id,
             i.warehouse_id,
-            i.suspend_until,
+            i.scheduled_for,
             i.payload,
             i.entity_ids,
             i.entity_types
         FROM input_rows i
-        ON CONFLICT ON CONSTRAINT unique_entity_type_entity_id_queue_name DO NOTHING
+        ON CONFLICT (warehouse_id, entity_type, entity_id, queue_name) DO NOTHING
         RETURNING task_id, queue_name, entity_id, entity_type as "entity_type: EntityType""#,
         &task_ids,
         queue_name,
         &parent_task_ids as _,
         &warehouse_idents,
-        &suspend_untils
+        &scheduled_fors
             .iter()
             .map(|t| t.as_ref())
             .collect::<Vec<_>>() as _,
         &states,
         &entity_ids,
-        &entity_types as _
+        &entity_types as _,
+        TaskStatus::Scheduled as _,
     )
     .fetch_all(conn)
     .await
@@ -180,27 +176,38 @@ pub(crate) async fn queue_task_batch(
 async fn pick_task(
     pool: &PgPool,
     queue_name: &str,
-    max_age: &sqlx::postgres::types::PgInterval,
+    max_age: chrono::Duration,
 ) -> Result<Option<Task>, IcebergErrorResponse> {
+    let max_age = PgInterval {
+        months: 0,
+        days: 0,
+        microseconds: max_age.num_microseconds().ok_or(ErrorModel::internal(
+            "Could not convert max_age into microseconds. Integer overflow, this is a bug.",
+            "InternalError",
+            None,
+        ))?,
+    };
     let x = sqlx::query!(
 r#" WITH updated_task AS (
         SELECT task_id, warehouse_id
         FROM task
-        WHERE (status = 'pending' AND queue_name = $1 AND ((suspend_until < now() AT TIME ZONE 'UTC') OR (suspend_until IS NULL)))
-                OR (status = 'running' AND (now() - picked_up_at) > $3)
+        WHERE (status = $4 AND queue_name = $1 AND ((scheduled_for < now() AT TIME ZONE 'UTC') OR (scheduled_for IS NULL)))
+                OR (status = $5 AND (now() - picked_up_at) > $3)
         FOR UPDATE SKIP LOCKED
         LIMIT 1
     ),
     cfg AS (SELECT config from task_config WHERE queue_name = $1 and warehouse_id = any(select warehouse_id from updated_task))
     UPDATE task
-    SET status = 'running', picked_up_at = $2, attempt = task.attempt + 1
+    SET status = $5, picked_up_at = $2, attempt = task.attempt + 1
     FROM updated_task
     WHERE task.task_id = updated_task.task_id
-    RETURNING task.task_id, task.entity_id, task.entity_type as "entity_type: EntityType", task.warehouse_id, task.task_data, task.suspend_until, task.status as "status: TaskStatus", task.picked_up_at, task.attempt, task.parent_task_id, task.queue_name, (select config from cfg)
+    RETURNING task.task_id, task.entity_id, task.entity_type as "entity_type: EntityType", task.warehouse_id, task.task_data, task.scheduled_for, task.status as "status: TaskStatus", task.picked_up_at, task.attempt, task.parent_task_id, task.queue_name, (select config from cfg)
     "#,
         queue_name,
         Utc::now(),
         max_age,
+        TaskStatus::Scheduled as _,
+        TaskStatus::Running as _,
     )
         .fetch_optional(pool)
         .await
@@ -217,7 +224,7 @@ r#" WITH updated_task AS (
                     EntityType::Tabular => EntityId::Tabular(task.entity_id),
                 },
                 parent_task_id: task.parent_task_id,
-                suspend_until: task.suspend_until,
+                schedule_for: Some(task.scheduled_for),
             },
             config: task.config,
             task_id: task.task_id,
@@ -240,14 +247,15 @@ async fn record_success(
     let _ = sqlx::query!(
         r#"
         WITH history as (
-            INSERT INTO task_log(task_id, warehouse_id, queue_name, task_data, status, entity_id, entity_type, message, attempt)
-                SELECT task_id, warehouse_id, queue_name, task_data, 'success', entity_id, entity_type, $2, attempt FROM task
+            INSERT INTO task_log(task_id, warehouse_id, queue_name, task_data, status, entity_id, entity_type, message, attempt, started_at, duration)
+                SELECT task_id, warehouse_id, queue_name, task_data, $3, entity_id, entity_type, $2, attempt, picked_up_at, now() - picked_up_at FROM task
                                                                         WHERE task_id = $1)
         DELETE FROM task
         WHERE task_id = $1
         "#,
         id,
-        message
+        message,
+        TaskOutcome::Success as _,
     )
     .execute(pool)
     .await
@@ -279,14 +287,15 @@ async fn record_failure(
         sqlx::query!(
             r#"
             WITH history as (
-                INSERT INTO task_log(task_id, warehouse_id, queue_name, task_data, status, entity_id, entity_type, attempt)
-                SELECT task_id, warehouse_id, queue_name, task_data, 'failure', entity_id, entity_type, attempt
+                INSERT INTO task_log(task_id, warehouse_id, queue_name, task_data, status, entity_id, entity_type, attempt, started_at, duration)
+                SELECT task_id, warehouse_id, queue_name, task_data, $2, entity_id, entity_type, attempt, picked_up_at, now() - picked_up_at
                 FROM task WHERE task_id = $1
             )
             DELETE FROM task
             WHERE task_id = $1
             "#,
-            id
+            id,
+            TaskOutcome::Failed as _,
         )
         .execute(conn)
         .await
@@ -295,16 +304,18 @@ async fn record_failure(
         sqlx::query!(
             r#"
             WITH task_log as (
-                INSERT INTO task_log(task_id, warehouse_id, queue_name, task_data, status, entity_id, entity_type, message, attempt)
-                SELECT task_id, warehouse_id, queue_name, task_data, 'failure', entity_id, entity_type, $2, attempt
+                INSERT INTO task_log(task_id, warehouse_id, queue_name, task_data, status, entity_id, entity_type, message, attempt, started_at, duration)
+                SELECT task_id, warehouse_id, queue_name, task_data, $4, entity_id, entity_type, $2, attempt, picked_up_at, now() - picked_up_at
                 FROM task WHERE task_id = $1
             )
             UPDATE task
-            SET status = 'pending'
+            SET status = $3
             WHERE task_id = $1
             "#,
             id,
-            details
+            details,
+            TaskStatus::Scheduled as _,
+            TaskOutcome::Failed as _,
         )
         .execute(conn)
         .await
@@ -314,7 +325,7 @@ async fn record_failure(
     Ok(())
 }
 
-use crate::service::task_queue::{EntityId, TaskInput, TaskMetadata};
+use crate::service::task_queue::{EntityId, TaskInput, TaskMetadata, TaskOutcome};
 
 /// Cancel pending tasks for a warehouse
 /// If `task_ids` are provided in `filter` which are not pending, they are ignored
@@ -327,16 +338,18 @@ pub(crate) async fn cancel_pending_tasks(
         TaskFilter::WarehouseId(warehouse_id) => {
             sqlx::query!(
                 r#"WITH log as (
-                        INSERT INTO task_log(task_id, warehouse_id, queue_name, task_data, entity_id, entity_type, status, attempt)
-                        SELECT task_id, warehouse_id, queue_name, task_data, entity_id, entity_type, 'cancellation', attempt
+                        INSERT INTO task_log(task_id, warehouse_id, queue_name, task_data, entity_id, entity_type, status, attempt, started_at, duration)
+                        SELECT task_id, warehouse_id, queue_name, task_data, entity_id, entity_type, $4, attempt, picked_up_at, now() - picked_up_at
                         FROM task
-                        WHERE status = 'pending' AND warehouse_id = $1 AND queue_name = $2
+                        WHERE status = $3 AND warehouse_id = $1 AND queue_name = $2
                     )
                     DELETE FROM task
-                    WHERE status = 'pending' AND warehouse_id = $1 AND queue_name = $2
+                    WHERE status = $3 AND warehouse_id = $1 AND queue_name = $2
                 "#,
                 *warehouse_id,
-                queue_name
+                queue_name,
+                TaskStatus::Scheduled as _,
+                TaskOutcome::Cancelled as _,
             )
             .fetch_all(connection)
             .await
@@ -353,16 +366,18 @@ pub(crate) async fn cancel_pending_tasks(
         TaskFilter::TaskIds(task_ids) => {
             sqlx::query!(
                 r#"WITH log as (
-                        INSERT INTO task_log(task_id, warehouse_id, queue_name, task_data, status, entity_id, entity_type, attempt)
-                        SELECT task_id, warehouse_id, queue_name, task_data, 'cancellation', entity_id, entity_type, attempt
+                        INSERT INTO task_log(task_id, warehouse_id, queue_name, task_data, status, entity_id, entity_type, attempt, started_at, duration)
+                        SELECT task_id, warehouse_id, queue_name, task_data, $2, entity_id, entity_type, attempt, picked_up_at, now() - picked_up_at
                         FROM task
-                        WHERE status = 'pending' AND task_id = ANY($1)
+                        WHERE status = $3 AND task_id = ANY($1)
                     )
                     DELETE FROM task
-                    WHERE status = 'pending'
+                    WHERE status = $3
                     AND task_id = ANY($1)
                 "#,
                 &task_ids.iter().map(|s| **s).collect::<Vec<_>>(),
+                TaskOutcome::Cancelled as _,
+                TaskStatus::Scheduled as _,
             )
             .fetch_all(connection)
             .await
@@ -383,6 +398,7 @@ mod test {
     use uuid::Uuid;
 
     use super::*;
+    use crate::service::task_queue::TaskQueueConfig;
     use crate::{
         api::management::v1::warehouse::TabularDeleteProfile,
         service::{
@@ -398,7 +414,7 @@ mod test {
         parent_task_id: Option<Uuid>,
         entity_id: EntityId,
         warehouse_id: WarehouseId,
-        suspend_until: Option<DateTime<Utc>>,
+        schedule_for: Option<DateTime<Utc>>,
         payload: Option<serde_json::Value>,
     ) -> Result<Option<Uuid>, IcebergErrorResponse> {
         Ok(queue_task_batch(
@@ -409,7 +425,7 @@ mod test {
                     warehouse_id,
                     parent_task_id,
                     entity_id,
-                    suspend_until,
+                    schedule_for,
                 },
                 payload: payload.unwrap_or(serde_json::json!({})),
             }],
@@ -465,7 +481,7 @@ mod test {
         )
         .await;
         (
-            PgQueue::from_config(ReadWrite::from_pools(pool.clone(), pool), config).unwrap(),
+            PgQueue::new(ReadWrite::from_pools(pool.clone(), pool)).unwrap(),
             wh.warehouse_id,
         )
     }
@@ -488,7 +504,7 @@ mod test {
         .unwrap()
         .unwrap();
 
-        let task = pick_task(&pool, "test", &queue.max_age)
+        let task = pick_task(&pool, "test", config.max_age)
             .await
             .unwrap()
             .unwrap();
@@ -502,7 +518,7 @@ mod test {
 
         record_failure(&pool, id, 5, "test").await.unwrap();
 
-        let task = pick_task(&pool, "test", &queue.max_age)
+        let task = pick_task(&pool, "test", config.max_age)
             .await
             .unwrap()
             .unwrap();
@@ -515,7 +531,7 @@ mod test {
 
         record_failure(&pool, id, 2, "test").await.unwrap();
 
-        assert!(pick_task(&pool, "test", &queue.max_age)
+        assert!(pick_task(&pool, "test", config.max_age)
             .await
             .unwrap()
             .is_none());
@@ -540,7 +556,7 @@ mod test {
         .unwrap()
         .unwrap();
 
-        let task = pick_task(&pool, "test", &queue.max_age)
+        let task = pick_task(&pool, "test", config.max_age)
             .await
             .unwrap()
             .unwrap();
@@ -554,7 +570,7 @@ mod test {
 
         record_success(id, &pool, Some("")).await.unwrap();
 
-        assert!(pick_task(&pool, "test", &queue.max_age)
+        assert!(pick_task(&pool, "test", config.max_age)
             .await
             .unwrap()
             .is_none());
@@ -584,7 +600,7 @@ mod test {
         .unwrap()
         .unwrap();
 
-        let task = pick_task(&pool, "test", &queue.max_age)
+        let task = pick_task(&pool, "test", config.max_age)
             .await
             .unwrap()
             .unwrap();
@@ -613,7 +629,7 @@ mod test {
         .unwrap();
         assert_ne!(id, id2);
 
-        let task = pick_task(&pool, "test", &queue.max_age)
+        let task = pick_task(&pool, "test", config.max_age)
             .await
             .unwrap()
             .unwrap();
@@ -669,7 +685,7 @@ mod test {
         .unwrap();
         assert_ne!(id, id2);
 
-        let task = pick_task(&pool, "test", &queue.max_age)
+        let task = pick_task(&pool, "test", config.max_age)
             .await
             .unwrap()
             .unwrap();
@@ -707,7 +723,7 @@ mod test {
         .unwrap()
         .unwrap();
 
-        let task = pick_task(&pool, "test", &queue.max_age)
+        let task = pick_task(&pool, "test", config.max_age)
             .await
             .unwrap()
             .unwrap();
@@ -738,7 +754,7 @@ mod test {
         .unwrap();
         assert_ne!(id, id2);
 
-        let task = pick_task(&pool, "test", &queue.max_age)
+        let task = pick_task(&pool, "test", config.max_age)
             .await
             .unwrap()
             .unwrap();
@@ -770,14 +786,14 @@ mod test {
         .unwrap()
         .unwrap();
 
-        assert!(pick_task(&pool, "test", &queue.max_age)
+        assert!(pick_task(&pool, "test", config.max_age)
             .await
             .unwrap()
             .is_none());
 
         tokio::time::sleep(std::time::Duration::from_millis(600)).await;
 
-        let task = pick_task(&pool, "test", &queue.max_age)
+        let task = pick_task(&pool, "test", config.max_age)
             .await
             .unwrap()
             .unwrap();
@@ -812,7 +828,7 @@ mod test {
         .unwrap()
         .unwrap();
 
-        let task = pick_task(&pool, "test", &queue.max_age)
+        let task = pick_task(&pool, "test", config.max_age)
             .await
             .unwrap()
             .unwrap();
@@ -826,7 +842,7 @@ mod test {
 
         tokio::time::sleep(std::time::Duration::from_millis(600)).await;
 
-        let task = pick_task(&pool, "test", &queue.max_age)
+        let task = pick_task(&pool, "test", config.max_age)
             .await
             .unwrap()
             .unwrap();
@@ -871,16 +887,16 @@ mod test {
         .unwrap()
         .unwrap();
 
-        let task = pick_task(&pool, "test", &queue.max_age)
+        let task = pick_task(&pool, "test", config.max_age)
             .await
             .unwrap()
             .unwrap();
-        let task2 = pick_task(&pool, "test", &queue.max_age)
+        let task2 = pick_task(&pool, "test", config.max_age)
             .await
             .unwrap()
             .unwrap();
         assert!(
-            pick_task(&pool, "test", &queue.max_age)
+            pick_task(&pool, "test", config.max_age)
                 .await
                 .unwrap()
                 .is_none(),
@@ -920,7 +936,7 @@ mod test {
                         entity_id: EntityId::Tabular(Uuid::now_v7()),
                         warehouse_id,
                         parent_task_id: None,
-                        suspend_until: None,
+                        schedule_for: None,
                     },
 
                     payload: serde_json::Value::default(),
@@ -930,7 +946,7 @@ mod test {
                         entity_id: EntityId::Tabular(Uuid::now_v7()),
                         warehouse_id,
                         parent_task_id: None,
-                        suspend_until: None,
+                        schedule_for: None,
                     },
                     payload: serde_json::Value::default(),
                 },
@@ -941,16 +957,16 @@ mod test {
         let id = ids[0].task_id;
         let id2 = ids[1].task_id;
 
-        let task = pick_task(&pool, "test", &queue.max_age)
+        let task = pick_task(&pool, "test", config.max_age)
             .await
             .unwrap()
             .unwrap();
-        let task2 = pick_task(&pool, "test", &queue.max_age)
+        let task2 = pick_task(&pool, "test", config.max_age)
             .await
             .unwrap()
             .unwrap();
         assert!(
-            pick_task(&pool, "test", &queue.max_age)
+            pick_task(&pool, "test", config.max_age)
                 .await
                 .unwrap()
                 .is_none(),
@@ -980,7 +996,7 @@ mod test {
             entity_id,
             warehouse_id,
             parent_task_id: None,
-            suspend_until: None,
+            schedule_for: None,
         }
     }
 
@@ -1011,16 +1027,16 @@ mod test {
         let id = ids[0].task_id;
         let id2 = ids[1].task_id;
 
-        let task = pick_task(&pool, "test", &queue.max_age)
+        let task = pick_task(&pool, "test", config.max_age)
             .await
             .unwrap()
             .unwrap();
-        let task2 = pick_task(&pool, "test", &queue.max_age)
+        let task2 = pick_task(&pool, "test", config.max_age)
             .await
             .unwrap()
             .unwrap();
         assert!(
-            pick_task(&pool, "test", &queue.max_age)
+            pick_task(&pool, "test", config.max_age)
                 .await
                 .unwrap()
                 .is_none(),
@@ -1102,7 +1118,7 @@ mod test {
         assert_eq!(&task.queue_name, "test");
 
         assert!(
-            pick_task(&pool, "test", &queue.max_age)
+            pick_task(&pool, "test", config.max_age)
                 .await
                 .unwrap()
                 .is_none(),
