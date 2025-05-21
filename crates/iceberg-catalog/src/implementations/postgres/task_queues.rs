@@ -398,12 +398,11 @@ mod test {
     use uuid::Uuid;
 
     use super::*;
-    use crate::service::task_queue::TaskQueueConfig;
     use crate::{
         api::management::v1::warehouse::TabularDeleteProfile,
         service::{
             authz::AllowAllAuthorizer,
-            task_queue::{EntityId, TaskId, TaskInput, TaskStatus},
+            task_queue::{EntityId, TaskId, TaskInput, TaskQueueConfig, TaskStatus},
         },
         WarehouseId,
     };
