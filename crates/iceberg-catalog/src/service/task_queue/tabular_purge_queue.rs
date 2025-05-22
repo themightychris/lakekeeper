@@ -7,7 +7,7 @@ use tracing::Instrument;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use super::{QueueConfig, TaskMetadata, TaskQueue, DEFAULT_MAX_AGE};
+use super::{QueueConfig, TaskMetadata, DEFAULT_MAX_AGE};
 use crate::{
     api::{management::v1::TabularType, Result},
     catalog::{io::remove_all, maybe_get_secret},
@@ -28,76 +28,56 @@ pub struct PurgeQueueConfig {}
 
 impl QueueConfig for PurgeQueueConfig {}
 
-#[derive(Debug, Clone)]
-pub struct PurgeQueue<C: Catalog, S: SecretStore> {
-    pub catalog_state: C::State,
-    pub secret_state: S,
-    pub poll_interval: std::time::Duration,
-}
-
-#[async_trait::async_trait]
-impl<C, S> TaskQueue for PurgeQueue<C, S>
-where
-    C: Catalog,
-    S: SecretStore,
-{
-    type Config = PurgeQueueConfig;
-
-    async fn run(&self) {
-        loop {
-            let task =
-                match C::pick_new_task(QUEUE_NAME, DEFAULT_MAX_AGE, self.catalog_state.clone())
-                    .await
-                {
-                    Ok(expiration) => expiration,
-                    Err(err) => {
-                        // TODO: add retry counter + exponential backoff
-                        tracing::error!("Failed to fetch purge: {:?}", err);
-                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                        continue;
-                    }
-                };
-
-            let Some(task) = task else {
-                tokio::time::sleep(self.poll_interval).await;
+pub async fn purge_task<C: Catalog, S: SecretStore>(
+    catalog_state: C::State,
+    secret_state: S,
+    poll_interval: std::time::Duration,
+) {
+    loop {
+        let task = match C::pick_new_task(QUEUE_NAME, DEFAULT_MAX_AGE, catalog_state.clone()).await
+        {
+            Ok(expiration) => expiration,
+            Err(err) => {
+                // TODO: add retry counter + exponential backoff
+                tracing::error!("Failed to fetch purge: {:?}", err);
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 continue;
-            };
-            let state = match task.task_state::<TabularPurge>() {
-                Ok(state) => state,
-                Err(err) => {
-                    tracing::error!("Failed to deserialize task state: {:?}", err);
-                    // TODO: record fatal error
-                    continue;
-                }
-            };
-            let config = match task.task_config::<Self::Config>() {
-                Ok(config) => config,
-                Err(err) => {
-                    tracing::error!("Failed to deserialize task config: {:?}", err);
-                    continue;
-                }
             }
-            .unwrap_or_default();
+        };
 
-            let span = tracing::debug_span!(
-                "tabular_purge",
-                location = %state.tabular_location,
-                warehouse_id = %task.task_metadata.warehouse_id,
-                tabular_type = %state.tabular_type,
-                queue_name = %task.queue_name,
-                task = ?task,
-            );
+        let Some(task) = task else {
+            tokio::time::sleep(poll_interval).await;
+            continue;
+        };
+        let state = match task.task_state::<TabularPurge>() {
+            Ok(state) => state,
+            Err(err) => {
+                tracing::error!("Failed to deserialize task state: {:?}", err);
+                // TODO: record fatal error
+                continue;
+            }
+        };
+        let config = match task.task_config::<PurgeQueueConfig>() {
+            Ok(config) => config,
+            Err(err) => {
+                tracing::error!("Failed to deserialize task config: {:?}", err);
+                continue;
+            }
+        }
+        .unwrap_or_default();
 
-            instrumented_purge::<_, C>(
-                self.catalog_state.clone(),
-                &self.secret_state,
-                &state,
-                &task,
-                &config,
-            )
+        let span = tracing::debug_span!(
+            "tabular_purge",
+            location = %state.tabular_location,
+            warehouse_id = %task.task_metadata.warehouse_id,
+            tabular_type = %state.tabular_type,
+            queue_name = %task.queue_name,
+            task = ?task,
+        );
+
+        instrumented_purge::<_, C>(catalog_state.clone(), &secret_state, &state, &task, &config)
             .instrument(span.or_current())
             .await;
-        }
     }
 }
 

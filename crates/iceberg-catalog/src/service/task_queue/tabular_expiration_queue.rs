@@ -3,7 +3,7 @@ use tracing::Instrument;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use super::{EntityId, QueueConfig, TaskMetadata, TaskQueue, DEFAULT_MAX_AGE};
+use super::{EntityId, QueueConfig, TaskMetadata, DEFAULT_MAX_AGE};
 use crate::{
     api::{
         management::v1::{DeleteKind, TabularType},
@@ -11,7 +11,10 @@ use crate::{
     },
     service::{
         authz::Authorizer,
-        task_queue::{tabular_purge_queue::TabularPurge, Task},
+        task_queue::{
+            tabular_purge_queue::{PurgeQueueConfig, TabularPurge},
+            Task,
+        },
         Catalog, TableId, Transaction, ViewId,
     },
 };
@@ -28,31 +31,6 @@ pub struct TabularExpiration {
 pub struct ExpirationQueueConfig {}
 
 impl QueueConfig for ExpirationQueueConfig {}
-
-#[derive(Debug, Clone)]
-pub struct ExpirationQueue<C: Catalog, A: Authorizer> {
-    pub(crate) catalog_state: C::State,
-    pub(crate) authz: A,
-    pub(crate) poll_interval: std::time::Duration,
-}
-
-#[async_trait::async_trait]
-impl<C, A> TaskQueue for ExpirationQueue<C, A>
-where
-    C: Catalog,
-    A: Authorizer,
-{
-    type Config = ExpirationQueueConfig;
-
-    async fn run(&self) {
-        tabular_expiration_task::<C, A>(
-            self.catalog_state.clone(),
-            self.authz.clone(),
-            self.poll_interval,
-        )
-        .await;
-    }
-}
 
 pub async fn tabular_expiration_task<C: Catalog, A: Authorizer>(
     catalog_state: C::State,
@@ -82,6 +60,14 @@ pub async fn tabular_expiration_task<C: Catalog, A: Authorizer>(
                 continue;
             }
         };
+        let config = match expiration.task_config::<ExpirationQueueConfig>() {
+            Ok(config) => config,
+            Err(err) => {
+                tracing::error!("Failed to deserialize task config: {:?}", err);
+                continue;
+            }
+        }
+        .unwrap_or_default();
 
         let EntityId::Tabular(tabular_id) = expiration.task_metadata.entity_id;
 

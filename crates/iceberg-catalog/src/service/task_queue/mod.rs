@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt::Debug, ops::Deref, sync::Arc, time::Duration};
+use std::{collections::HashMap, fmt::Debug, ops::Deref, time::Duration};
 
 use chrono::Utc;
 use futures::future::BoxFuture;
@@ -10,8 +10,7 @@ use uuid::Uuid;
 use super::{authz::Authorizer, Transaction, WarehouseId};
 use crate::service::{
     task_queue::{
-        tabular_expiration_queue::{ExpirationQueue, ExpirationQueueConfig},
-        tabular_purge_queue::{PurgeQueue, PurgeQueueConfig},
+        tabular_expiration_queue::ExpirationQueueConfig, tabular_purge_queue::PurgeQueueConfig,
     },
     Catalog, SecretStore,
 };
@@ -111,25 +110,10 @@ impl QueueConfigs {
     }
 }
 
-#[async_trait::async_trait]
-pub trait TaskQueue: Clone {
-    type Config: Send
-        + Sync
-        + 'static
-        + Clone
-        + DeserializeOwned
-        + Serialize
-        + ToSchema
-        + Default
-        + QueueConfig;
-    async fn run(&self);
-}
-
-pub type TaskQueueProducer = Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync + 'static>;
+pub type TaskQueueProducer = Box<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync + 'static>;
 
 pub const DEFAULT_CHANNEL_SIZE: usize = 1000;
 
-#[derive(Clone)]
 struct RegisteredQueue {
     pub queue_task: TaskQueueProducer,
     num_workers: usize,
@@ -139,11 +123,12 @@ impl Debug for RegisteredQueue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RegisteredQueue")
             .field("queue_task", &"Fn(...)")
+            .field("num_workers", &self.num_workers)
             .finish()
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 pub struct TaskQueues {
     registered_queues: HashMap<&'static str, RegisteredQueue>,
 }
@@ -156,20 +141,17 @@ impl TaskQueues {
         }
     }
 
-    pub fn register_queue<T: TaskQueue + Sync + Send + 'static>(
+    pub fn register_queue(
         &mut self,
         queue_name: &'static str,
-        queue_task: T,
+        queue_task: TaskQueueProducer,
         num_workers: usize,
     ) {
         self.registered_queues.insert(
             queue_name,
             RegisteredQueue {
+                queue_task,
                 num_workers,
-                queue_task: Arc::new(move || {
-                    let clone = queue_task.clone();
-                    Box::pin(async move { clone.run().await })
-                }),
             },
         );
     }
@@ -219,51 +201,40 @@ impl TaskQueues {
         S: SecretStore,
         A: Authorizer,
     {
-        // Arc::new(move || {
-        //     let catalog_state = catalog_state_clone.clone();
-        //     let authorizer = authorizer.clone();
-        //     async move {
-        //         tabular_expiration_queue::tabular_expiration_task::<C, A>(
-        //             catalog_state,
-        //             authorizer,
-        //             poll_interval,
-        //         )
-        //             .await;
-        //         Ok(())
-        //     }
-        //         .boxed()
-        // })
         let catalog_state_clone = catalog_state.clone();
         self.register_queue(
             tabular_expiration_queue::QUEUE_NAME,
-            ExpirationQueue::<C, A> {
-                catalog_state: catalog_state.clone(),
-                authz: authorizer,
-                poll_interval,
-            },
+            Box::new(move || {
+                let authorizer = authorizer.clone();
+                let catalog_state_clone = catalog_state_clone.clone();
+                Box::pin({
+                    async move {
+                        tabular_expiration_queue::tabular_expiration_task::<C, A>(
+                            catalog_state_clone.clone(),
+                            authorizer.clone(),
+                            poll_interval,
+                        )
+                        .await;
+                    }
+                })
+            }),
             2,
         );
-        // Arc::new(move || {
-        //     let catalog_state = catalog_state.clone();
-        //     let secret_store = secret_store.clone();
-        //     async move {
-        //         tabular_purge_queue::purge_task::<C, S>(
-        //             catalog_state,
-        //             secret_store,
-        //             poll_interval,
-        //         )
-        //             .await;
-        //         Ok(())
-        //     }
-        //         .boxed()
-        // })
+
         self.register_queue(
             tabular_purge_queue::QUEUE_NAME,
-            PurgeQueue::<C, S> {
-                catalog_state: catalog_state_clone,
-                secret_state: secret_store.clone(),
-                poll_interval,
-            },
+            Box::new(move || {
+                let catalog_state_clone = catalog_state.clone();
+                let secret_store = secret_store.clone();
+                Box::pin(async move {
+                    tabular_purge_queue::purge_task::<C, S>(
+                        catalog_state_clone.clone(),
+                        secret_store.clone(),
+                        poll_interval,
+                    )
+                    .await;
+                })
+            }),
             2,
         );
         self.run().await?;
