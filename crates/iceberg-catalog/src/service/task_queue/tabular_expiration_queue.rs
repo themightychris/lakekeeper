@@ -11,10 +11,7 @@ use crate::{
     },
     service::{
         authz::Authorizer,
-        task_queue::{
-            tabular_purge_queue::{PurgeQueueConfig, TabularPurge},
-            Task,
-        },
+        task_queue::{tabular_purge_queue::TabularPurge, Task},
         Catalog, TableId, Transaction, ViewId,
     },
 };
@@ -60,7 +57,7 @@ pub async fn tabular_expiration_task<C: Catalog, A: Authorizer>(
                 continue;
             }
         };
-        let config = match expiration.task_config::<ExpirationQueueConfig>() {
+        let _config = match expiration.task_config::<ExpirationQueueConfig>() {
             Ok(config) => config,
             Err(err) => {
                 tracing::error!("Failed to deserialize task config: {:?}", err);

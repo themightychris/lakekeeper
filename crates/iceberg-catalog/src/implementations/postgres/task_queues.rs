@@ -4,7 +4,9 @@ use sqlx::{postgres::types::PgInterval, PgConnection, PgPool};
 use uuid::Uuid;
 
 use crate::{
-    api::management::v1::warehouse::{GetTaskQueueConfigResponse, SetTaskQueueConfigRequest},
+    api::management::v1::warehouse::{
+        GetTaskQueueConfigResponse, QueueConfig, SetTaskQueueConfigRequest,
+    },
     implementations::postgres::dbutils::DBErrorHandler,
     service::task_queue::{Task, TaskFilter, TaskStatus},
     WarehouseId,
@@ -343,18 +345,18 @@ pub(crate) async fn get_task_queue_config(
         return Ok(None);
     };
     Ok(Some(GetTaskQueueConfigResponse {
-        queue_config: QueueConfigs::from_serde_value(queue_name, result.config)?,
+        queue_config: QueueConfig(result.config),
         max_age_seconds: result.max_age.map(|x| x.microseconds / 1_000_000),
     }))
 }
 
 pub(crate) async fn set_task_queue_config(
     transaction: &mut PgConnection,
+    queue_name: &str,
     warehouse_id: WarehouseId,
     config: SetTaskQueueConfigRequest,
 ) -> crate::api::Result<()> {
-    let serialized = config.queue_config.to_serde_value()?;
-    let queue_name = config.queue_config.queue_name();
+    let serialized = config.queue_config.0;
     let max_age = if let Some(max_age) = config.max_age_seconds {
         Some(PgInterval {
             months: 0,
@@ -438,7 +440,7 @@ pub(crate) async fn check_task(
 }
 
 use crate::service::task_queue::{
-    EntityId, QueueConfigs, TaskCheckState, TaskId, TaskInput, TaskMetadata, TaskOutcome,
+    EntityId, TaskCheckState, TaskId, TaskInput, TaskMetadata, TaskOutcome,
 };
 
 /// Cancel pending tasks for a warehouse

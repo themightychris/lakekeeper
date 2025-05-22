@@ -2193,6 +2193,64 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/IcebergErrorResponse'
+  /management/v1/{warehouse_id}/task-queue/{queue_name}/config:
+    get:
+      tags:
+        - warehouse
+      summary: Get Namespace Protection
+      description: Retrieves whether a namespace is protected from deletion.
+      operationId: get_task_queue_config
+      parameters:
+        - name: warehouse_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: queue_name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GetTaskQueueConfigResponse'
+        4XX:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IcebergErrorResponse'
+    post:
+      tags:
+        - warehouse
+      operationId: set_task_queue_config
+      parameters:
+        - name: warehouse_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetTaskQueueConfigRequest'
+        required: true
+      responses:
+        '204':
+          description: Task queue config set successfully
+        4XX:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IcebergErrorResponse'
 components:
   schemas:
     AdlsProfile:
@@ -2717,6 +2775,8 @@ components:
         type:
           type: string
           description: Internal type definition of the error
+    ExpirationQueueConfig:
+      type: object
     GcsCredential:
       oneOf:
         - type: object
@@ -2968,6 +3028,18 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/TableAssignment'
+    GetTaskQueueConfigResponse:
+      type: object
+      required:
+        - queue-config
+      properties:
+        max-age-seconds:
+          type:
+            - integer
+            - 'null'
+          format: int64
+        queue-config:
+          $ref: '#/components/schemas/QueueConfig'
     GetViewAccessResponse:
       type: object
       required:
@@ -3374,6 +3446,12 @@ components:
             - 'null'
           format: date-time
           description: Updated at
+    PurgeQueueConfig:
+      type: object
+    QueueConfig:
+      oneOf:
+        - $ref: '#/components/schemas/PurgeQueueConfig'
+        - $ref: '#/components/schemas/ExpirationQueueConfig'
     RenameProjectRequest:
       type: object
       required:
@@ -3833,6 +3911,18 @@ components:
         protected:
           type: boolean
           description: Setting this to `true` will prevent the entity from being deleted unless `force` is used.
+    SetTaskQueueConfigRequest:
+      type: object
+      required:
+        - queue-config
+      properties:
+        max-age-seconds:
+          type:
+            - integer
+            - 'null'
+          format: int64
+        queue-config:
+          $ref: '#/components/schemas/QueueConfig'
     StorageCredential:
       oneOf:
         - allOf:

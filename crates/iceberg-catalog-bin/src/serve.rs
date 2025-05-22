@@ -334,7 +334,13 @@ async fn serve_inner<A: Authorizer, N: Authenticator + 'static>(
     let hooks = EndpointHookCollection::new(vec![Arc::new(CloudEventsPublisher::new(
         cloud_events_tx.clone(),
     ))]);
-    let queues = TaskQueues::new();
+    let mut queues = TaskQueues::new();
+    queues.register_built_in_queues::<PostgresCatalog, Secrets, A>(
+        catalog_state.clone(),
+        secrets_state.clone(),
+        authorizer.clone(),
+        CONFIG.task_poll_interval,
+    );
 
     let router = new_full_router::<PostgresCatalog, _, Secrets, _>(RouterArgs {
         authenticator: authenticator.clone(),
@@ -347,6 +353,7 @@ async fn serve_inner<A: Authorizer, N: Authenticator + 'static>(
         metrics_layer: Some(layer),
         endpoint_statistics_tracker_tx: endpoint_statistics_tracker_tx.clone(),
         hooks,
+        queue_configs: queues.schemas(),
     })?;
 
     #[cfg(feature = "ui")]
@@ -377,7 +384,7 @@ async fn serve_inner<A: Authorizer, N: Authenticator + 'static>(
     let stats_handle = tokio::task::spawn(tracker.run());
 
     tokio::select!(
-        _ = queues.spawn_queues::<PostgresCatalog, _, _>(catalog_state, secrets_state, authorizer, CONFIG.task_poll_interval) => tracing::error!("Tabular queue task failed"),
+        _ = queues.spawn_queues() => tracing::error!("Tabular queue task failed"),
         err = service_serve(listener, router) => tracing::error!("Service failed: {err:?}"),
         _ = metrics_future => tracing::error!("Metrics server failed"),
     );

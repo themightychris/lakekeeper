@@ -289,11 +289,12 @@ pub(crate) fn spawn_drop_queues<T: Authorizer>(
 ) {
     let ctx = ctx.clone();
 
-    let queues = TaskQueues::new();
-    tokio::task::spawn(queues.spawn_queues::<PostgresCatalog, _, T>(
+    let mut queues = TaskQueues::new();
+    queues.register_built_in_queues::<PostgresCatalog, SecretsState, T>(
         ctx.v1_state.catalog.clone(),
         ctx.v1_state.secrets.clone(),
         ctx.v1_state.authz.clone(),
         poll_interval.unwrap_or(CONFIG.task_poll_interval),
-    ));
+    );
+    tokio::task::spawn(queues.spawn_queues());
 }

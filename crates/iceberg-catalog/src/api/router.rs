@@ -11,6 +11,7 @@ use tower_http::{
     sensitive_headers::SetSensitiveHeadersLayer, timeout::TimeoutLayer, trace, trace::TraceLayer,
     ServiceBuilderExt,
 };
+use utoipa::openapi::{RefOr, Schema};
 
 use crate::{
     api::{
@@ -48,6 +49,7 @@ pub struct RouterArgs<C: Catalog, A: Authorizer + Clone, S: SecretStore, N: Auth
     pub metrics_layer: Option<PrometheusMetricLayer<'static>>,
     pub endpoint_statistics_tracker_tx: EndpointStatisticsTrackerTx,
     pub hooks: EndpointHookCollection,
+    pub queue_configs: Vec<(&'static str, String, RefOr<Schema>)>,
 }
 
 impl<C: Catalog, A: Authorizer + Clone, S: SecretStore, N: Authenticator + Debug> Debug
@@ -60,7 +62,7 @@ impl<C: Catalog, A: Authorizer + Clone, S: SecretStore, N: Authenticator + Debug
             .field("secrets_state", &"SecretsState")
             .field("table_change_checkers", &self.table_change_checkers)
             .field("authenticator", &self.authenticator)
-            .field("svhp", &self.service_health_provider)
+            .field("service_health_provider", &self.service_health_provider)
             .field("cors_origins", &self.cors_origins)
             .field(
                 "metrics_layer",
@@ -71,6 +73,7 @@ impl<C: Catalog, A: Authorizer + Clone, S: SecretStore, N: Authenticator + Debug
                 &self.endpoint_statistics_tracker_tx,
             )
             .field("endpoint_hooks", &self.hooks)
+            .field("queue_configs", &self.queue_configs.len())
             .finish()
     }
 }
@@ -96,6 +99,7 @@ pub fn new_full_router<
         metrics_layer,
         endpoint_statistics_tracker_tx,
         hooks,
+        queue_configs,
     }: RouterArgs<C, A, S, N>,
 ) -> anyhow::Result<Router> {
     let v1_routes = new_v1_full_router::<crate::catalog::CatalogServer<C, A, S>, State<A, C, S>>();
@@ -157,7 +161,10 @@ pub fn new_full_router<
         )
         .merge(
             utoipa_swagger_ui::SwaggerUi::new("/swagger-ui")
-                .url("/api-docs/management/v1/openapi.json", v1_api_doc::<A>())
+                .url(
+                    "/api-docs/management/v1/openapi.json",
+                    v1_api_doc::<A>(queue_configs)?,
+                )
                 .external_url_unchecked(
                     "/api-docs/catalog/v1/openapi.json",
                     ICEBERG_OPENAPI_SPEC_YAML.clone(),

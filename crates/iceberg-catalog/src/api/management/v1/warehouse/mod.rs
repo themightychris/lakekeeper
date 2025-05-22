@@ -31,7 +31,7 @@ use crate::{
     service::{
         authz::{Authorizer, CatalogProjectAction, CatalogWarehouseAction},
         secrets::SecretStore,
-        task_queue::{QueueConfigs, TaskFilter},
+        task_queue::TaskFilter,
         Catalog, ListFlags, NamespaceId, State, TableId, TabularId, Transaction,
     },
     ProjectId, WarehouseId, DEFAULT_PROJECT_ID,
@@ -951,13 +951,38 @@ pub trait Service<C: Catalog, A: Authorizer, S: SecretStore> {
 
     async fn set_task_queue_config(
         warehouse_id: WarehouseId,
+        queue_name: String,
         request: SetTaskQueueConfigRequest,
         context: ApiContext<State<A, C, S>>,
         _request_metadata: RequestMetadata,
     ) -> Result<()> {
         // TODO: authz
         let mut transaction = C::Transaction::begin_write(context.v1_state.catalog).await?;
-        C::set_task_queue_config(warehouse_id, request, transaction.transaction()).await?;
+
+        if let Some(validator) = crate::service::task_queue::DESER
+            .get()
+            .and_then(|val| val.get(queue_name.as_str()))
+        {
+            validator(request.queue_config.0.clone()).map_err(|e| {
+                ErrorModel::bad_request(
+                    format!(
+                        "Failed to deserialize queue config for queue-name '{queue_name}': '{e}'"
+                    ),
+                    "InvalidQueueConfig",
+                    None,
+                )
+            })?;
+        } else {
+            tracing::info!("No validator found for queue {queue_name}");
+        }
+
+        C::set_task_queue_config(
+            warehouse_id,
+            queue_name.as_str(),
+            request,
+            transaction.transaction(),
+        )
+        .await?;
         transaction.commit().await?;
         Ok(())
     }
@@ -982,17 +1007,23 @@ pub trait Service<C: Catalog, A: Authorizer, S: SecretStore> {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "kebab-case")]
 pub struct SetTaskQueueConfigRequest {
-    pub queue_config: QueueConfigs,
+    pub queue_config: QueueConfig,
     pub max_age_seconds: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "kebab-case")]
 pub struct GetTaskQueueConfigResponse {
-    pub queue_config: QueueConfigs,
+    pub queue_config: QueueConfig,
     pub max_age_seconds: Option<i64>,
 }
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[serde(transparent)]
+pub struct QueueConfig(pub(crate) serde_json::Value);
 
 impl axum::response::IntoResponse for GetTaskQueueConfigResponse {
     fn into_response(self) -> axum::http::Response<axum::body::Body> {

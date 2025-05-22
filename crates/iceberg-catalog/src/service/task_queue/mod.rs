@@ -1,8 +1,14 @@
-use std::{collections::HashMap, fmt::Debug, ops::Deref, time::Duration};
+use std::{
+    collections::HashMap,
+    fmt::{Debug, Formatter},
+    ops::Deref,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 use chrono::Utc;
 use futures::future::BoxFuture;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Serialize};
 use strum::EnumIter;
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -18,7 +24,7 @@ use crate::service::{
 pub mod tabular_expiration_queue;
 pub mod tabular_purge_queue;
 
-pub trait QueueConfig {
+pub trait QueueConfig: ToSchema + Serialize + DeserializeOwned {
     fn max_age(&self) -> chrono::Duration {
         DEFAULT_MAX_AGE
     }
@@ -30,90 +36,12 @@ pub trait QueueConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(tag = "queue_name", rename_all = "kebab-case")]
-pub enum QueueConfigs {
-    TabularPurge(PurgeQueueConfig),
-    TabularExpiration(ExpirationQueueConfig),
-}
+pub type TaskQueueProducer = Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync + 'static>;
+pub type ValidatorFn = Box<dyn Fn(serde_json::Value) -> serde_json::Result<()> + Send + Sync>;
 
-impl QueueConfigs {
-    /// Converts the queue config to a `serde_json::Value`.
-    ///
-    /// # Errors
-    /// serialization to json fails
-    pub fn to_serde_value(&self) -> crate::api::Result<serde_json::Value> {
-        Ok(match self {
-            QueueConfigs::TabularPurge(cfg) => serde_json::to_value(cfg).map_err(|e| {
-                crate::api::ErrorModel::internal(
-                    format!("Failed to serialize queue config: {e}"),
-                    "QueueConfigSerializationError",
-                    Some(Box::new(e)),
-                )
-            }),
-            QueueConfigs::TabularExpiration(cfg) => serde_json::to_value(cfg).map_err(|e| {
-                crate::api::ErrorModel::internal(
-                    format!("Failed to serialize queue config: {e}"),
-                    "QueueConfigSerializationError",
-                    Some(Box::new(e)),
-                )
-            }),
-        }?)
-    }
+pub(crate) static DESER: OnceLock<HashMap<&'static str, ValidatorFn>> = OnceLock::new();
 
-    /// Converts a `serde_json::Value` to a queue config.
-    ///
-    /// # Errors
-    /// Unknown queue name or deserialization error
-    pub fn from_serde_value(
-        queue_name: &str,
-        value: serde_json::Value,
-    ) -> crate::api::Result<Self> {
-        Ok(match queue_name {
-            tabular_purge_queue::QUEUE_NAME => {
-                QueueConfigs::TabularPurge(serde_json::from_value(value).map_err(|e| {
-                    crate::api::ErrorModel::internal(
-                        format!("Failed to deserialize queue config: {e}"),
-                        "QueueConfigDeserializationError",
-                        Some(Box::new(e)),
-                    )
-                })?)
-            }
-            tabular_expiration_queue::QUEUE_NAME => {
-                QueueConfigs::TabularExpiration(serde_json::from_value(value).map_err(|e| {
-                    crate::api::ErrorModel::internal(
-                        format!("Failed to deserialize queue config: {e}"),
-                        "QueueConfigDeserializationError",
-                        Some(Box::new(e)),
-                    )
-                })?)
-            }
-            _ => {
-                return Err(crate::api::ErrorModel::bad_request(
-                    "Invalid queue name",
-                    "InvalidQueueName",
-                    None,
-                )
-                .into());
-            }
-        })
-    }
-}
-
-impl QueueConfigs {
-    #[must_use]
-    pub fn queue_name(&self) -> &'static str {
-        match self {
-            QueueConfigs::TabularPurge(_) => tabular_purge_queue::QUEUE_NAME,
-            QueueConfigs::TabularExpiration(_) => tabular_expiration_queue::QUEUE_NAME,
-        }
-    }
-}
-
-pub type TaskQueueProducer = Box<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync + 'static>;
-
-pub const DEFAULT_CHANNEL_SIZE: usize = 1000;
-
+#[derive(Clone)]
 struct RegisteredQueue {
     pub queue_task: TaskQueueProducer,
     num_workers: usize,
@@ -128,9 +56,25 @@ impl Debug for RegisteredQueue {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct TaskQueues {
     registered_queues: HashMap<&'static str, RegisteredQueue>,
+    schemas: Vec<(
+        &'static str,
+        String,
+        utoipa::openapi::RefOr<utoipa::openapi::Schema>,
+    )>,
+    schema_validators: HashMap<&'static str, ValidatorFn>,
+}
+
+impl Debug for TaskQueues {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TaskQueues")
+            .field("registered_queues", &self.registered_queues.len())
+            .field("schemas", &self.schemas.len())
+            .field("schema_validators", &self.schema_validators.len())
+            .finish()
+    }
 }
 
 impl TaskQueues {
@@ -138,15 +82,24 @@ impl TaskQueues {
     pub fn new() -> Self {
         Self {
             registered_queues: HashMap::new(),
+            schemas: vec![],
+            schema_validators: HashMap::default(),
         }
     }
 
-    pub fn register_queue(
+    pub fn register_queue<T: QueueConfig>(
         &mut self,
         queue_name: &'static str,
         queue_task: TaskQueueProducer,
         num_workers: usize,
     ) {
+        let des = |v| serde_json::from_value::<T>(v).map(|_| ());
+        self.schema_validators.insert(queue_name, Box::new(des));
+        self.schemas.push((
+            queue_name,
+            T::name().to_string(),
+            utoipa::openapi::RefOr::Ref(utoipa::openapi::Ref::from_schema_name(T::name())),
+        ));
         self.registered_queues.insert(
             queue_name,
             RegisteredQueue {
@@ -156,9 +109,75 @@ impl TaskQueues {
         );
     }
 
-    async fn run(mut self) -> anyhow::Result<()> {
+    #[must_use]
+    pub fn schemas(
+        &self,
+    ) -> Vec<(
+        &'static str,
+        String,
+        utoipa::openapi::RefOr<utoipa::openapi::Schema>,
+    )> {
+        self.schemas.clone()
+    }
+
+    pub fn register_built_in_queues<C: Catalog, S: SecretStore, A: Authorizer>(
+        &mut self,
+        catalog_state: C::State,
+        secret_store: S,
+        authorizer: A,
+        poll_interval: Duration,
+    ) {
+        let catalog_state_clone = catalog_state.clone();
+        self.register_queue::<ExpirationQueueConfig>(
+            tabular_expiration_queue::QUEUE_NAME,
+            Arc::new(move || {
+                let authorizer = authorizer.clone();
+                let catalog_state_clone = catalog_state_clone.clone();
+                Box::pin({
+                    async move {
+                        tabular_expiration_queue::tabular_expiration_task::<C, A>(
+                            catalog_state_clone.clone(),
+                            authorizer.clone(),
+                            poll_interval,
+                        )
+                        .await;
+                    }
+                })
+            }),
+            2,
+        );
+
+        self.register_queue::<PurgeQueueConfig>(
+            tabular_purge_queue::QUEUE_NAME,
+            Arc::new(move || {
+                let catalog_state_clone = catalog_state.clone();
+                let secret_store = secret_store.clone();
+                Box::pin(async move {
+                    tabular_purge_queue::purge_task::<C, S>(
+                        catalog_state_clone.clone(),
+                        secret_store.clone(),
+                        poll_interval,
+                    )
+                    .await;
+                })
+            }),
+            2,
+        );
+    }
+
+    /// Spawns the built-in queues, currently `tabular_expiration_queue` and `tabular_purge_queue` alongside any
+    /// registered custom queues.
+    ///
+    /// # Errors
+    /// Fails if any of the queue handlers exit unexpectedly.
+    pub async fn spawn_queues(mut self) -> Result<(), anyhow::Error> {
         let mut queue_tasks = vec![];
         let mut qs = HashMap::with_capacity(0);
+        DESER.set(self.schema_validators).map_err(|_| {
+            tracing::error!("Failed to set schema validators");
+            anyhow::anyhow!("Failed to set schema validators")
+        })?;
+
         std::mem::swap(&mut self.registered_queues, &mut qs);
         for (
             name,
@@ -182,63 +201,6 @@ impl TaskQueues {
         }
         tracing::error!("Task queue {index} exited unexpectedly");
         Err(anyhow::anyhow!("Task queue {index} exited unexpectedly"))
-    }
-
-    /// Spawns the built-in queues, currently `tabular_expiration_queue` and `tabular_purge_queue` alongside any
-    /// registered custom queues.
-    ///
-    /// # Errors
-    /// Fails if any of the queue handlers exit unexpectedly.
-    pub async fn spawn_queues<C, S, A>(
-        mut self,
-        catalog_state: C::State,
-        secret_store: S,
-        authorizer: A,
-        poll_interval: std::time::Duration,
-    ) -> Result<(), anyhow::Error>
-    where
-        C: Catalog,
-        S: SecretStore,
-        A: Authorizer,
-    {
-        let catalog_state_clone = catalog_state.clone();
-        self.register_queue(
-            tabular_expiration_queue::QUEUE_NAME,
-            Box::new(move || {
-                let authorizer = authorizer.clone();
-                let catalog_state_clone = catalog_state_clone.clone();
-                Box::pin({
-                    async move {
-                        tabular_expiration_queue::tabular_expiration_task::<C, A>(
-                            catalog_state_clone.clone(),
-                            authorizer.clone(),
-                            poll_interval,
-                        )
-                        .await;
-                    }
-                })
-            }),
-            2,
-        );
-
-        self.register_queue(
-            tabular_purge_queue::QUEUE_NAME,
-            Box::new(move || {
-                let catalog_state_clone = catalog_state.clone();
-                let secret_store = secret_store.clone();
-                Box::pin(async move {
-                    tabular_purge_queue::purge_task::<C, S>(
-                        catalog_state_clone.clone(),
-                        secret_store.clone(),
-                        poll_interval,
-                    )
-                    .await;
-                })
-            }),
-            2,
-        );
-        self.run().await?;
-        Ok(())
     }
 }
 
@@ -471,7 +433,7 @@ mod test {
         },
         implementations::postgres::{
             tabular::table::tests::initialize_table, warehouse::test::initialize_warehouse,
-            CatalogState, PostgresCatalog, PostgresTransaction,
+            CatalogState, PostgresCatalog, PostgresTransaction, SecretsState,
         },
         service::{
             authz::AllowAllAuthorizer,
@@ -487,21 +449,20 @@ mod test {
     async fn test_queue_expiration_queue_task(pool: PgPool) {
         let catalog_state = CatalogState::from_pools(pool.clone(), pool.clone());
 
-        let queues = crate::service::task_queue::TaskQueues::new();
+        let mut queues = crate::service::task_queue::TaskQueues::new();
 
         let secrets =
             crate::implementations::postgres::SecretsState::from_pools(pool.clone(), pool);
         let cat = catalog_state.clone();
         let sec = secrets.clone();
         let auth = AllowAllAuthorizer;
-        let _queue_task = tokio::task::spawn(
-            queues.spawn_queues::<PostgresCatalog, _, AllowAllAuthorizer>(
-                cat,
-                sec,
-                auth,
-                std::time::Duration::from_millis(100),
-            ),
+        queues.register_built_in_queues::<PostgresCatalog, SecretsState, AllowAllAuthorizer>(
+            cat,
+            sec,
+            auth,
+            std::time::Duration::from_millis(100),
         );
+        let _queue_task = tokio::task::spawn(queues.spawn_queues());
 
         let warehouse = initialize_warehouse(
             catalog_state.clone(),

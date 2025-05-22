@@ -37,7 +37,10 @@ pub mod v1 {
         CreateUserRequest, SearchUserRequest, SearchUserResponse, Service as _, UpdateUserRequest,
         User,
     };
-    use utoipa::{openapi::security::SecurityScheme, OpenApi, ToSchema};
+    use utoipa::{
+        openapi::{security::SecurityScheme, RefOr, Schema},
+        OpenApi, ToSchema,
+    };
     use view::ViewManagementService as _;
     use warehouse::{
         CreateWarehouseRequest, CreateWarehouseResponse, GetWarehouseResponse,
@@ -55,7 +58,8 @@ pub mod v1 {
                 project::{EndpointStatisticsResponse, GetEndpointStatisticsRequest},
                 user::{ListUsersQuery, ListUsersResponse},
                 warehouse::{
-                    GetTaskQueueConfigResponse, SetTaskQueueConfigRequest, UndropTabularsRequest,
+                    GetTaskQueueConfigResponse, QueueConfig, SetTaskQueueConfigRequest,
+                    UndropTabularsRequest,
                 },
             },
             ApiContext, IcebergErrorResponse, Result,
@@ -124,6 +128,8 @@ pub mod v1 {
             search_user,
             set_namespace_protection,
             set_table_protection,
+            set_task_queue_config,
+            get_task_queue_config,
             set_view_protection,
             set_warehouse_protection,
             get_namespace_protection,
@@ -1453,15 +1459,26 @@ pub mod v1 {
         .await
     }
 
-    // TODO: utoipa stuff
+    /// Set task-queue config
+    #[utoipa::path(
+        post,
+        tag = "warehouse",
+        path = ManagementV1Endpoint::SetTaskQueueConfig.path(),
+        params(("warehouse_id" = Uuid,)),
+        responses(
+            (status = 204, description = "Task queue config set successfully"),
+            (status = "4XX", body = IcebergErrorResponse),
+        )
+    )]
     async fn set_task_queue_config<C: Catalog, A: Authorizer + Clone, S: SecretStore>(
-        Path(warehouse_id): Path<uuid::Uuid>,
+        Path((warehouse_id, queue_name)): Path<(uuid::Uuid, String)>,
         Extension(metadata): Extension<RequestMetadata>,
         AxumState(api_context): AxumState<ApiContext<State<A, C, S>>>,
         Json(request): Json<SetTaskQueueConfigRequest>,
     ) -> Result<StatusCode> {
         ApiServer::<C, A, S>::set_task_queue_config(
             warehouse_id.into(),
+            queue_name,
             request,
             api_context,
             metadata,
@@ -1470,7 +1487,17 @@ pub mod v1 {
         Ok(StatusCode::NO_CONTENT)
     }
 
-    // TODO: utoipa stuff
+    /// Get task-queue config
+    #[utoipa::path(
+        get,
+        tag = "warehouse",
+        path = ManagementV1Endpoint::SetTaskQueueConfig.path(),
+        params(("warehouse_id" = Uuid,),("queue_name" = String,)),
+        responses(
+            (status = 200, body = GetTaskQueueConfigResponse),
+            (status = "4XX", body = IcebergErrorResponse),
+        )
+    )]
     async fn get_task_queue_config<C: Catalog, A: Authorizer + Clone, S: SecretStore>(
         Path((warehouse_id, queue_name)): Path<(uuid::Uuid, String)>,
         Extension(metadata): Extension<RequestMetadata>,
@@ -1552,13 +1579,97 @@ pub mod v1 {
         Purge,
     }
 
-    #[must_use]
-    pub fn api_doc<A: Authorizer>() -> utoipa::openapi::OpenApi {
+    pub fn api_doc<A: Authorizer>(
+        queue_configs: Vec<(&'static str, String, RefOr<Schema>)>,
+    ) -> anyhow::Result<utoipa::openapi::OpenApi> {
         let mut doc = ManagementApiDoc::openapi();
+        let comps = doc.components.as_mut().unwrap();
+        let mut q_ref_names = vec![];
+        let mut one_of_builder = utoipa::openapi::OneOfBuilder::new();
+        for (q_name, name, q) in queue_configs {
+            comps.schemas.insert(name.to_string(), q.clone());
+            q_ref_names.push((q_name, name.to_string()));
+            one_of_builder = one_of_builder.item(RefOr::Ref(
+                utoipa::openapi::schema::RefBuilder::new()
+                    .ref_location_from_schema_name(name.to_string())
+                    .build(),
+            ));
+        }
+        comps
+            .schemas
+            .insert(
+                QueueConfig::name().to_string(),
+                RefOr::T(Schema::OneOf(one_of_builder.build())),
+            )
+            .unwrap();
+        // for (p, path) in &mut doc.paths.paths {
+        //     if p == ManagementV1Endpoint::SetTaskQueueConfig.path() {
+        //         if let Some(schema) = path
+        //             .post
+        //             .as_mut()
+        //             .and_then(|p| {
+        //                 p.request_body.as_mut().map(|rq| {
+        //                     rq.content
+        //                         .get_mut("application/json")
+        //                         .map(|content| content.schema.as_mut())
+        //                 })
+        //             })
+        //             .flatten()
+        //             .flatten()
+        //         {
+        //             patch_schema(comps, &q_ref_names, schema)?;
+        //         } else if let Some(schema) = path
+        //             .get
+        //             .as_mut()
+        //             .and_then(|p| p.responses.responses.get_mut("200"))
+        //         {
+        //             match schema {
+        //                 RefOr::Ref(_) => {}
+        //                 RefOr::T(_) => {}
+        //             }
+        //             patch_schema(comps, &q_ref_names, schema)?;
+        //         }
+        //     }
+        // }
 
         doc.merge(A::api_doc());
-        doc
+        Ok(doc)
     }
+
+    // fn patch_schema(
+    //     comps: &mut Components,
+    //     q_ref_names: &[(&str, String)],
+    //     schema: &mut RefOr<Schema>,
+    // ) -> anyhow::Result<()> {
+    //     match schema {
+    //         RefOr::Ref(r) => {
+    //             let RefOr::T(schema) = comps
+    //                 .schemas
+    //                 .get_mut(r.ref_location.split('/').next_back().unwrap())
+    //                 .unwrap()
+    //             else {
+    //                 anyhow::bail!(
+    //                     "cannot patch SchemaRef at '{}', please pass a literal.",
+    //                     r.ref_location
+    //                 );
+    //             };
+    //
+    //             let Schema::Object(o) = schema else {
+    //                 panic!();
+    //             };
+    //             o.properties.remove("queue-config");
+    //
+    //             o.properties.insert(
+    //                 "queue-config".to_string(),
+    //                 RefOr::T(Schema::OneOf(one_of_builder.build())),
+    //             );
+    //         }
+    //         RefOr::T(_) => {
+    //             anyhow::bail!("cannot patch literal schema",);
+    //         }
+    //     }
+    // }
+
     impl<C: Catalog, A: Authorizer, S: SecretStore> ApiServer<C, A, S> {
         #[allow(clippy::too_many_lines)]
         pub fn new_v1_router(authorizer: &A) -> Router<ApiContext<State<A, C, S>>> {
@@ -1674,12 +1785,8 @@ pub mod v1 {
                     post(set_warehouse_protection),
                 )
                 .route(
-                    "/warehouse/{warehouse_id}/task-queue/config",
-                    post(set_task_queue_config),
-                )
-                .route(
                     "/warehouse/{warehouse_id}/task-queue/{queue_name}/config",
-                    get(get_task_queue_config),
+                    post(set_task_queue_config).get(get_task_queue_config),
                 )
                 .merge(authorizer.new_router())
         }
