@@ -58,8 +58,8 @@ pub mod v1 {
                 project::{EndpointStatisticsResponse, GetEndpointStatisticsRequest},
                 user::{ListUsersQuery, ListUsersResponse},
                 warehouse::{
-                    GetTaskQueueConfigResponse, QueueConfig, SetTaskQueueConfigRequest,
-                    UndropTabularsRequest,
+                    GetTaskQueueConfigResponse, QueueConfig, QueueConfigResponse,
+                    SetTaskQueueConfigRequest, UndropTabularsRequest,
                 },
             },
             ApiContext, IcebergErrorResponse, Result,
@@ -1640,6 +1640,20 @@ pub mod v1 {
             .insert(
                 QueueConfig::name().to_string(),
                 RefOr::T(Schema::OneOf(one_of_builder.build())),
+            )
+            .is_none()
+        {
+            tracing::warn!(
+                "No components with name '{}' found in the OpenAPI document, not patching queue configs in.",
+                QueueConfig::name()
+            );
+        }
+
+        if comps
+            .schemas
+            .insert(
+                QueueConfigResponse::name().to_string(),
+                RefOr::T(Schema::OneOf(response_one_of_builder.build())),
             )
             .is_none()
         {

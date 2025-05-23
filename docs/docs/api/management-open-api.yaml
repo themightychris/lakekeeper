@@ -2197,8 +2197,7 @@ paths:
     get:
       tags:
         - warehouse
-      summary: Get Namespace Protection
-      description: Retrieves whether a namespace is protected from deletion.
+      summary: Get task-queue config
       operationId: get_task_queue_config
       parameters:
         - name: warehouse_id
@@ -2228,6 +2227,7 @@ paths:
     post:
       tags:
         - warehouse
+      summary: Set task-queue config
       operationId: set_task_queue_config
       parameters:
         - name: warehouse_id
@@ -2777,6 +2777,17 @@ components:
           description: Internal type definition of the error
     ExpirationQueueConfig:
       type: object
+    ExpirationQueueConfigResponse:
+      allOf:
+        - $ref: '#/components/schemas/ExpirationQueueConfig'
+        - type: object
+          required:
+            - queue-name
+          properties:
+            queue-name:
+              type: string
+              enum:
+                - tabular_expiration
     GcsCredential:
       oneOf:
         - type: object
@@ -3039,7 +3050,7 @@ components:
             - 'null'
           format: int64
         queue-config:
-          $ref: '#/components/schemas/QueueConfig'
+          $ref: '#/components/schemas/QueueConfigResponse'
     GetViewAccessResponse:
       type: object
       required:
@@ -3448,10 +3459,25 @@ components:
           description: Updated at
     PurgeQueueConfig:
       type: object
+    PurgeQueueConfigResponse:
+      allOf:
+        - $ref: '#/components/schemas/PurgeQueueConfig'
+        - type: object
+          required:
+            - queue-name
+          properties:
+            queue-name:
+              type: string
+              enum:
+                - tabular_purge
     QueueConfig:
       oneOf:
         - $ref: '#/components/schemas/PurgeQueueConfig'
         - $ref: '#/components/schemas/ExpirationQueueConfig'
+    QueueConfigResponse:
+      oneOf:
+        - $ref: '#/components/schemas/PurgeQueueConfigResponse'
+        - $ref: '#/components/schemas/ExpirationQueueConfigResponse'
     RenameProjectRequest:
       type: object
       required:
