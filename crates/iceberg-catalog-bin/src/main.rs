@@ -192,7 +192,7 @@ async fn main() -> anyhow::Result<()> {
                 AuthZBackend::OpenFGA => {
                     v1_api_doc::<UnauthenticatedOpenFGAAuthorizer>(queue_configs)
                 }
-            }?;
+            };
             println!("{}", doc.to_yaml()?);
         }
         None => {

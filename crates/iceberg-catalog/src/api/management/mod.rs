@@ -1579,11 +1579,20 @@ pub mod v1 {
         Purge,
     }
 
+    /// Get the `OpenAPI` documentation for the management API.
+    ///
+    /// # Errors
+    ///
     pub fn api_doc<A: Authorizer>(
         queue_configs: Vec<(&'static str, String, RefOr<Schema>)>,
-    ) -> anyhow::Result<utoipa::openapi::OpenApi> {
+    ) -> utoipa::openapi::OpenApi {
         let mut doc = ManagementApiDoc::openapi();
-        let comps = doc.components.as_mut().unwrap();
+        let Some(comps) = doc.components.as_mut() else {
+            tracing::warn!(
+                "No components found in the OpenAPI document, not patching queue configs in."
+            );
+            return doc;
+        };
         let mut q_ref_names = vec![];
         let mut one_of_builder = utoipa::openapi::OneOfBuilder::new();
         for (q_name, name, q) in queue_configs {
@@ -1595,80 +1604,23 @@ pub mod v1 {
                     .build(),
             ));
         }
-        comps
+        if comps
             .schemas
             .insert(
                 QueueConfig::name().to_string(),
                 RefOr::T(Schema::OneOf(one_of_builder.build())),
             )
-            .unwrap();
-        // for (p, path) in &mut doc.paths.paths {
-        //     if p == ManagementV1Endpoint::SetTaskQueueConfig.path() {
-        //         if let Some(schema) = path
-        //             .post
-        //             .as_mut()
-        //             .and_then(|p| {
-        //                 p.request_body.as_mut().map(|rq| {
-        //                     rq.content
-        //                         .get_mut("application/json")
-        //                         .map(|content| content.schema.as_mut())
-        //                 })
-        //             })
-        //             .flatten()
-        //             .flatten()
-        //         {
-        //             patch_schema(comps, &q_ref_names, schema)?;
-        //         } else if let Some(schema) = path
-        //             .get
-        //             .as_mut()
-        //             .and_then(|p| p.responses.responses.get_mut("200"))
-        //         {
-        //             match schema {
-        //                 RefOr::Ref(_) => {}
-        //                 RefOr::T(_) => {}
-        //             }
-        //             patch_schema(comps, &q_ref_names, schema)?;
-        //         }
-        //     }
-        // }
+            .is_none()
+        {
+            tracing::warn!(
+                "No components with name '{}' found in the OpenAPI document, not patching queue configs in.",
+                QueueConfig::name()
+            );
+        }
 
         doc.merge(A::api_doc());
-        Ok(doc)
+        doc
     }
-
-    // fn patch_schema(
-    //     comps: &mut Components,
-    //     q_ref_names: &[(&str, String)],
-    //     schema: &mut RefOr<Schema>,
-    // ) -> anyhow::Result<()> {
-    //     match schema {
-    //         RefOr::Ref(r) => {
-    //             let RefOr::T(schema) = comps
-    //                 .schemas
-    //                 .get_mut(r.ref_location.split('/').next_back().unwrap())
-    //                 .unwrap()
-    //             else {
-    //                 anyhow::bail!(
-    //                     "cannot patch SchemaRef at '{}', please pass a literal.",
-    //                     r.ref_location
-    //                 );
-    //             };
-    //
-    //             let Schema::Object(o) = schema else {
-    //                 panic!();
-    //             };
-    //             o.properties.remove("queue-config");
-    //
-    //             o.properties.insert(
-    //                 "queue-config".to_string(),
-    //                 RefOr::T(Schema::OneOf(one_of_builder.build())),
-    //             );
-    //         }
-    //         RefOr::T(_) => {
-    //             anyhow::bail!("cannot patch literal schema",);
-    //         }
-    //     }
-    // }
 
     impl<C: Catalog, A: Authorizer, S: SecretStore> ApiServer<C, A, S> {
         #[allow(clippy::too_many_lines)]
