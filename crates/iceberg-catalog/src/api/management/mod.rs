@@ -1595,12 +1595,43 @@ pub mod v1 {
         };
         let mut q_ref_names = vec![];
         let mut one_of_builder = utoipa::openapi::OneOfBuilder::new();
+        let mut response_one_of_builder = utoipa::openapi::OneOfBuilder::new();
         for (q_name, name, q) in queue_configs {
+            let config_response_name = format!("{name}Response");
+
+            let all_of_builder = utoipa::openapi::AllOfBuilder::new()
+                .item(RefOr::Ref(
+                    utoipa::openapi::schema::RefBuilder::new()
+                        .ref_location_from_schema_name(name.to_string())
+                        .build(),
+                ))
+                .item(
+                    utoipa::openapi::schema::Object::builder()
+                        .property(
+                            "queue-name",
+                            utoipa::openapi::schema::Object::builder()
+                                .schema_type(utoipa::openapi::schema::SchemaType::new(
+                                    utoipa::openapi::schema::Type::String,
+                                ))
+                                .enum_values::<[&str; 1usize], &str>(Some([q_name])),
+                        )
+                        .required("queue-name"),
+                );
+
             comps.schemas.insert(name.to_string(), q.clone());
+            comps.schemas.insert(
+                config_response_name.clone(),
+                RefOr::T(Schema::AllOf(all_of_builder.build())),
+            );
             q_ref_names.push((q_name, name.to_string()));
             one_of_builder = one_of_builder.item(RefOr::Ref(
                 utoipa::openapi::schema::RefBuilder::new()
                     .ref_location_from_schema_name(name.to_string())
+                    .build(),
+            ));
+            response_one_of_builder = response_one_of_builder.item(RefOr::Ref(
+                utoipa::openapi::schema::RefBuilder::new()
+                    .ref_location_from_schema_name(config_response_name)
                     .build(),
             ));
         }

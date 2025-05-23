@@ -131,3 +131,6 @@ create index task_queue_name_status_idx on task (queue_name, status);
 create index task_warehouse_queue_name_idx on task (warehouse_id, queue_name);
 create index if not exists task_entity_type_entity_id_idx
     on task (warehouse_id, entity_type, entity_id);
+
+ALTER TYPE api_endpoints ADD VALUE 'management-v1-set-task-queue-config';
+ALTER TYPE api_endpoints ADD VALUE 'management-v1-get-task-queue-config';

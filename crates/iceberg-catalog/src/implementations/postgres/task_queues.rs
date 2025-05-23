@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::{
     api::management::v1::warehouse::{
-        GetTaskQueueConfigResponse, QueueConfig, SetTaskQueueConfigRequest,
+        GetTaskQueueConfigResponse, QueueConfigResponse, SetTaskQueueConfigRequest,
     },
     implementations::postgres::dbutils::DBErrorHandler,
     service::task_queue::{Task, TaskFilter, TaskStatus},
@@ -349,7 +349,10 @@ pub(crate) async fn get_task_queue_config(
         return Ok(None);
     };
     Ok(Some(GetTaskQueueConfigResponse {
-        queue_config: QueueConfig(result.config),
+        queue_config: QueueConfigResponse {
+            config: result.config,
+            queue_name: queue_name.to_string(),
+        },
         max_age_seconds: result.max_age.map(|x| x.microseconds / 1_000_000),
     }))
 }

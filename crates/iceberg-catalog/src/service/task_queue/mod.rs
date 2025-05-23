@@ -443,7 +443,6 @@ mod test {
         },
     };
 
-    // #[cfg(feature = "sqlx-postgres")]
     #[sqlx::test]
     #[traced_test]
     async fn test_queue_expiration_queue_task(pool: PgPool) {

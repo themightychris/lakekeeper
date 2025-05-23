@@ -1016,15 +1016,23 @@ pub struct SetTaskQueueConfigRequest {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[serde(transparent)]
+pub struct QueueConfig(pub(crate) serde_json::Value);
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "kebab-case")]
 pub struct GetTaskQueueConfigResponse {
-    pub queue_config: QueueConfig,
+    pub queue_config: QueueConfigResponse,
     pub max_age_seconds: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-#[serde(transparent)]
-pub struct QueueConfig(pub(crate) serde_json::Value);
+#[serde(rename_all = "kebab-case")]
+pub struct QueueConfigResponse {
+    #[serde(flatten)]
+    pub(crate) config: serde_json::Value,
+    pub(crate) queue_name: String,
+}
 
 impl axum::response::IntoResponse for GetTaskQueueConfigResponse {
     fn into_response(self) -> axum::http::Response<axum::body::Body> {
