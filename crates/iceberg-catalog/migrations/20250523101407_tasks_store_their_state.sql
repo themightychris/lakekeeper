@@ -88,7 +88,7 @@ select task.task_id,
        CASE
            when task.status = 'cancelled' then 'cancelled'::task_final_status
            when task.status = 'failed' then 'failed'::task_final_status
-           when task.status = 'done' then 'completed'::task_final_status
+           when task.status = 'done' then 'success'::task_final_status
            END,
        task.last_error_details,
        task.entity_id,

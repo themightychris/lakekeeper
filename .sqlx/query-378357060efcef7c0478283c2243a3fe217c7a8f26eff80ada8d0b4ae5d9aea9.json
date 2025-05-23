@@ -14,7 +14,7 @@
               "Enum": [
                 "failed",
                 "cancelled",
-                "completed"
+                "success"
               ]
             }
           }

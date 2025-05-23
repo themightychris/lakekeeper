@@ -150,10 +150,14 @@ pub(crate) async fn pick_task(
         r#"WITH updated_task AS (
         SELECT task_id, t.warehouse_id, config
         FROM task t
-        LEFT JOIN task_config tc ON tc.queue_name = t.queue_name AND tc.warehouse_id = t.warehouse_id
+        LEFT JOIN task_config tc
+            ON tc.queue_name = t.queue_name
+                   AND tc.warehouse_id = t.warehouse_id
         WHERE (status = $3 AND t.queue_name = $1
                    AND scheduled_for < now() AT TIME ZONE 'UTC')
            OR (status = $4 AND (now() - last_heartbeat_at) > COALESCE(tc.max_age, $2))
+        -- FOR UPDATE locks the row we select here, SKIP LOCKED makes us not wait for rows other
+        -- transactions locked, this is our queue right there.
         FOR UPDATE OF t SKIP LOCKED
         LIMIT 1
     )
