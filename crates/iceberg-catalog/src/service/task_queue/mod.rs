@@ -48,12 +48,15 @@ pub trait QueueConfig: ToSchema + Serialize + DeserializeOwned {
 pub struct Queue {
     #[serde(skip)]
     validator_fn: ValidatorFn,
-    queue_name: String,
+    name: String,
     num_workers: usize,
 }
 
 impl Queue {
     /// Validates the incoming config payload against the `validator_fn`.
+    ///
+    /// # Errors
+    /// Returns an error if the `payload` is rejected by `validator_fn`.
     pub fn validate_config(&self, payload: serde_json::Value) -> Result<(), serde_json::Error> {
         (self.validator_fn)(payload)
     }
@@ -63,7 +66,7 @@ impl Debug for Queue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Queue")
             .field("validator_fn", &"Fn(...)")
-            .field("queue_name", &self.queue_name)
+            .field("queue_name", &self.name)
             .field("num_workers", &self.num_workers)
             .finish()
     }
@@ -210,7 +213,7 @@ impl TaskQueues {
                         .schema_validators
                         .remove(name)
                         .ok_or(anyhow::anyhow!("Validator function not found"))?,
-                    queue_name: name.to_string(),
+                    name: name.to_string(),
                     num_workers,
                 },
             );

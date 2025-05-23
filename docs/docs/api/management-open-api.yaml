@@ -3498,6 +3498,17 @@ components:
           description: Updated at
     PurgeQueueConfig:
       type: object
+    Queue:
+      type: object
+      required:
+        - name
+        - num_workers
+      properties:
+        name:
+          type: string
+        num_workers:
+          type: integer
+          minimum: 0
     QueueConfig: {}
     QueueConfigResponse:
       allOf:
@@ -3944,7 +3955,7 @@ components:
         queues:
           type: array
           items:
-            type: string
+            $ref: '#/components/schemas/Queue'
           description: List of queues that are registered for the server.
         server-id:
           type: string

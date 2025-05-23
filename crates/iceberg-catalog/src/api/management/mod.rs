@@ -1606,8 +1606,20 @@ pub mod v1 {
                 .path()
                 .replace("{queue_name}", q_name);
             let mut p = config_path.clone();
-            let post = p.post.as_mut().unwrap();
-            let body = post.request_body.as_mut().unwrap();
+            let Some(post) = p.post.as_mut() else {
+                tracing::warn!(
+                    "No post method found for '{}', not patching queue configs into the ApiDoc.",
+                    ManagementV1Endpoint::SetTaskQueueConfig.path()
+                );
+                return doc;
+            };
+            let Some(body) = post.request_body.as_mut() else {
+                tracing::warn!(
+                    "No request body found for the '{}', not patching queue configs into the ApiDoc.",
+                    ManagementV1Endpoint::SetTaskQueueConfig.path()
+                );
+                return doc;
+            };
             body.content.insert(
                 "application/json".to_string(),
                 utoipa::openapi::ContentBuilder::new()
@@ -1618,19 +1630,21 @@ pub mod v1 {
                     )))
                     .build(),
             );
-            let get = p.get.as_mut().unwrap();
-            let _ = get
-                .responses
-                .responses
-                .insert(
-                    "200".to_string(),
-                    RefOr::Ref(
-                        utoipa::openapi::schema::RefBuilder::new()
-                            .ref_location_from_schema_name(name.to_string())
-                            .build(),
-                    ),
-                )
-                .unwrap();
+            let Some(get) = p.get.as_mut() else {
+                tracing::warn!(
+                    "No get method found for '{}', not patching queue configs into the ApiDoc.",
+                    ManagementV1Endpoint::SetTaskQueueConfig.path()
+                );
+                return doc;
+            };
+            get.responses.responses.insert(
+                "200".to_string(),
+                RefOr::Ref(
+                    utoipa::openapi::schema::RefBuilder::new()
+                        .ref_location_from_schema_name(name.to_string())
+                        .build(),
+                ),
+            );
 
             paths.insert(path, p);
 
