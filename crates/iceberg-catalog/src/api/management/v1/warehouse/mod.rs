@@ -976,7 +976,25 @@ pub trait Service<C: Catalog, A: Authorizer, S: SecretStore> {
                     )
                 })?;
         } else {
-            tracing::info!("No validator found for queue {queue_name}");
+            tracing::debug!(
+                "Queue '{queue_name}' not found, got queues: {:?}",
+                crate::service::task_queue::RUNNING_QUEUES
+            );
+            let existing_queues = crate::service::task_queue::RUNNING_QUEUES
+                .get()
+                .map(|h| {
+                    h.keys()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            return Err(ErrorModel::bad_request(
+                format!("Queue '{queue_name}' not found! Existing queues: [{existing_queues}]"),
+                "QueueNotFound",
+                None,
+            )
+            .into());
         }
 
         C::set_task_queue_config(
