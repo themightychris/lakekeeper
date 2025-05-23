@@ -14,7 +14,7 @@
 
     Open Feature Requests and report Issues on Github.
 
--   :material-webhook: &nbsp; __[Enterprise Support](https://lakekeeper.io)__
+-   :material-webhook: &nbsp; __[Enterprise Support](https://vakamo.com)__
 
     ---
 

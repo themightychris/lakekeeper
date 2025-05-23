@@ -7,10 +7,12 @@ use crate::{
         iceberg::v1::{ListTablesQuery, NamespaceParameters, PaginationQuery},
         ApiContext, Result,
     },
-    catalog::{namespace::validate_namespace_ident, require_warehouse_id, tabular::list_entities},
+    catalog::{
+        namespace::authorized_namespace_ident_to_id, require_warehouse_id, tabular::list_entities,
+    },
     request_metadata::RequestMetadata,
     service::{
-        authz::{Authorizer, CatalogNamespaceAction, CatalogViewAction, CatalogWarehouseAction},
+        authz::{Authorizer, CatalogNamespaceAction, CatalogViewAction},
         Catalog, SecretStore, State, Transaction,
     },
 };
@@ -25,28 +27,22 @@ pub(crate) async fn list_views<C: Catalog, A: Authorizer + Clone, S: SecretStore
     // ------------------- VALIDATIONS -------------------
     let NamespaceParameters { namespace, prefix } = parameters;
     let warehouse_id = require_warehouse_id(prefix)?;
-    validate_namespace_ident(&namespace)?;
 
     // ------------------- AUTHZ -------------------
     let authorizer = state.v1_state.authz;
-    authorizer
-        .require_warehouse_action(
-            &request_metadata,
-            warehouse_id,
-            CatalogWarehouseAction::CanUse,
-        )
-        .await?;
+
     let mut t: <C as Catalog>::Transaction =
         C::Transaction::begin_read(state.v1_state.catalog).await?;
-    let namespace_id = C::namespace_to_id(warehouse_id, &namespace, t.transaction()).await; // We can't fail before AuthZ.
 
-    authorizer
-        .require_namespace_action(
-            &request_metadata,
-            namespace_id,
-            CatalogNamespaceAction::CanListViews,
-        )
-        .await?;
+    let _namespace_id = authorized_namespace_ident_to_id::<C, _>(
+        authorizer.clone(),
+        &request_metadata,
+        &warehouse_id,
+        &namespace,
+        CatalogNamespaceAction::CanListViews,
+        t.transaction(),
+    )
+    .await?;
 
     // ------------------- BUSINESS LOGIC -------------------
 

@@ -213,11 +213,6 @@ def test_drop_table(
 
 
 def test_drop_table_purge_spark(spark, warehouse: conftest.Warehouse, storage_config):
-    if storage_config["storage-profile"]["type"] == "s3":
-        pytest.skip(
-            "S3 fails to purge tables since it tries to sign a DELETE request for the bucket location which we don't want to sign."
-        )
-
     spark.sql("CREATE NAMESPACE test_drop_table_purge_spark")
     spark.sql(
         "CREATE TABLE test_drop_table_purge_spark.my_table (my_ints INT, my_floats DOUBLE, strings STRING) USING iceberg"
@@ -292,8 +287,9 @@ def drop_table_and_assert_that_table_is_gone(
             pytest.skip(
                 "S3 purge test requires s3 credentials to be set in the storage profile."
             )
-        # Gotta use the s3 creds here since the prefix no longer exists after deletion & at least minio will not allow
-        # listing a location that doesn't exist with our downscoped cred
+        # We use s3 credentials from the config, as fileio configured for
+        # remote signing can't work after the table is deleted. We want to check
+        # that the location is deleted after the table is purged.
         properties = dict()
         properties["s3.access-key-id"] = storage_config["storage-credential"][
             "aws-access-key-id"
@@ -310,9 +306,13 @@ def drop_table_and_assert_that_table_is_gone(
     file_io = io._infer_file_io_from_scheme(table_0.location(), properties)
     # sleep to give time for the table to be gone
     time.sleep(5)
+    # On filesystems with hierarchies like HDFS and ADLS we might leave
+    # empty directories. This is a known issue:
+    # https://github.com/lakekeeper/lakekeeper/issues/1064
     location = table_0.location().rstrip("/") + "/"
     inp = file_io.new_input(location)
-    assert not inp.exists(), f"Table location {location} still exists"
+    if storage_config["storage-profile"]["type"] != "adls":
+        assert not inp.exists(), f"Table location {location} still exists"
     tables = warehouse.pyiceberg_catalog.list_tables(namespace)
     assert len(tables) == 1
     for n, ((_, table), df) in enumerate(zip(sorted(tables), dfs[1:]), 1):
@@ -340,11 +340,6 @@ def drop_table_and_assert_that_table_is_gone(
 
 
 def test_undrop_table_purge_http(spark, warehouse: conftest.Warehouse, storage_config):
-    if storage_config["storage-profile"]["type"] == "adls":
-        # pyiceberg load_table doesn't contain any of the adls properties so this test doesn't work until
-        # https://github.com/apache/iceberg-python/issues/1146 is resolved
-        pytest.skip("ADLS currently doesn't work with pyiceberg.")
-
     namespace = "test_undrop_table_purge_http"
     spark.sql(f"CREATE NAMESPACE {namespace}")
     dfs = []
@@ -414,16 +409,15 @@ def undrop_table(table_0, warehouse):
         headers={"Authorization": f"Bearer {warehouse.access_token}"},
     )
     resp.raise_for_status()
-    time.sleep(5)
 
 
 def test_undropped_table_can_be_purged_again_http(
     spark, warehouse: conftest.Warehouse, storage_config
 ):
-    if storage_config["storage-profile"]["type"] == "adls":
-        # pyiceberg load_table doesn't contain any of the adls properties so this test doesn't work until
-        # https://github.com/apache/iceberg-python/issues/1146 is resolved
-        pytest.skip("ADLS currently doesn't work with pyiceberg.")
+    # if storage_config["storage-profile"]["type"] == "adls":
+    #     # pyiceberg load_table doesn't contain any of the adls properties so this test doesn't work until
+    #     # https://github.com/apache/iceberg-python/issues/1146 is resolved
+    #     pytest.skip("ADLS currently doesn't work with pyiceberg.")
 
     namespace = "test_undropped_table_can_be_purged_again_http"
     spark.sql(f"CREATE NAMESPACE {namespace}")
@@ -1003,8 +997,6 @@ def test_register_table(
     table = warehouse.pyiceberg_catalog.load_table((*namespace.name, "my_table"))
     assert spark.sql(f"SHOW TABLES IN {namespace.spark_name}").toPandas().shape[0] == 1
 
-    # ToDo: Cannot re-register a table
-
     # Remove table from catalog
     delete_uri = (
         warehouse.server.catalog_url.strip("/")
@@ -1023,10 +1015,12 @@ def test_register_table(
     requests.delete(
         delete_uri, headers={"Authorization": f"Bearer {warehouse.access_token}"}
     ).raise_for_status()
-    time.sleep(3)
 
     # Can't query table anymore
     assert spark.sql(f"SHOW TABLES IN {namespace.spark_name}").toPandas().shape[0] == 0
+
+    # Wait for expiration of soft delete
+    time.sleep(3)
 
     spark.sql(
         f"""

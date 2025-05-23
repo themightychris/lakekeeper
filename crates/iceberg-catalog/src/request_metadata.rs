@@ -10,7 +10,10 @@ use iceberg_ext::catalog::rest::{ErrorModel, IcebergErrorResponse};
 use limes::Authentication;
 use uuid::Uuid;
 
-use crate::{service::authn::Actor, ProjectId, WarehouseId, CONFIG, DEFAULT_PROJECT_ID};
+use crate::{
+    service::{authn::Actor, TabularId},
+    ProjectId, WarehouseId, CONFIG, DEFAULT_PROJECT_ID,
+};
 
 const PROJECT_ID_HEADER_DEPRECATED: &str = "x-project-ident";
 pub const X_PROJECT_ID_HEADER: &str = "x-project-id";
@@ -182,8 +185,17 @@ impl RequestMetadata {
     }
 
     #[must_use]
-    pub fn s3_signer_uri_for_warehouse(&self, warehouse_id: WarehouseId) -> String {
-        format!("{}/v1/{warehouse_id}", self.base_uri_catalog())
+    pub fn s3_signer_uri(&self, _warehouse_id: WarehouseId) -> String {
+        format!("{}/", self.base_uri_catalog())
+    }
+
+    #[must_use]
+    pub fn s3_signer_endpoint_for_table(
+        &self,
+        warehouse_id: WarehouseId,
+        table_id: TabularId,
+    ) -> String {
+        format!("v1/signer/{warehouse_id}/tabular-id/{table_id}/v1/aws/s3/sign")
     }
 
     #[must_use]

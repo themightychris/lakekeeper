@@ -44,12 +44,14 @@ use crate::{
         management::v1::{warehouse::TabularDeleteProfile, DeleteKind, TabularType},
         set_not_found_status_code,
     },
-    catalog,
-    catalog::{compression_codec::CompressionCodec, tabular::list_entities},
+    catalog::{self, compression_codec::CompressionCodec, tabular::list_entities},
     request_metadata::RequestMetadata,
     retry::retry_fn,
     service::{
-        authz::{Authorizer, CatalogNamespaceAction, CatalogTableAction, CatalogWarehouseAction},
+        authz::{
+            Authorizer, CatalogNamespaceAction, CatalogTableAction, CatalogWarehouseAction,
+            TableUuid,
+        },
         contract_verification::{ContractVerification, ContractVerificationOutcome},
         secrets::SecretStore,
         storage::{StorageLocations as _, StoragePermissions, StorageProfile, ValidationError},
@@ -280,6 +282,9 @@ impl<C: Catalog, A: Authorizer + Clone, S: SecretStore>
                 storage_secret.as_ref(),
                 &table_location,
                 StoragePermissions::ReadWriteDelete,
+                &request_metadata,
+                warehouse_id,
+                table_id.into(),
             )
             .await?;
 
@@ -327,6 +332,7 @@ impl<C: Catalog, A: Authorizer + Clone, S: SecretStore>
     }
 
     /// Register a table in the given namespace using given metadata file location
+    #[allow(clippy::too_many_lines)]
     async fn register_table(
         parameters: NamespaceParameters,
         request: RegisterTableRequest,
@@ -343,19 +349,19 @@ impl<C: Catalog, A: Authorizer + Clone, S: SecretStore>
 
         // ------------------- AUTHZ -------------------
         let authorizer = state.v1_state.authz.clone();
-        let mut t = C::Transaction::begin_write(state.v1_state.catalog).await?;
+        let mut t_read = C::Transaction::begin_read(state.v1_state.catalog.clone()).await?;
         let namespace_id = authorized_namespace_ident_to_id::<C, _>(
             authorizer.clone(),
             &request_metadata,
             &warehouse_id,
             namespace,
             CatalogNamespaceAction::CanCreateTable,
-            t.transaction(),
+            t_read.transaction(),
         )
         .await?;
 
         // ------------------- BUSINESS LOGIC -------------------
-        let warehouse = C::require_warehouse(warehouse_id, t.transaction()).await?;
+        let warehouse = C::require_warehouse(warehouse_id, t_read.transaction()).await?;
         let storage_profile = &warehouse.storage_profile;
 
         require_active_warehouse(warehouse.status)?;
@@ -367,10 +373,49 @@ impl<C: Catalog, A: Authorizer + Clone, S: SecretStore>
         let table_metadata = read_metadata_file(&file_io, &metadata_location).await?;
         let table_location = parse_location(table_metadata.location(), StatusCode::BAD_REQUEST)?;
 
+        // Check if we need to handle overwrite
+        let mut previous_table_id = None;
+
+        let mut t_write = C::Transaction::begin_write(state.v1_state.catalog).await?;
+        if request.overwrite {
+            // Check if table exists
+            previous_table_id = C::table_to_id(
+                warehouse_id,
+                &table,
+                ListFlags {
+                    include_active: true,
+                    include_staged: true,
+                    include_deleted: false,
+                },
+                t_read.transaction(),
+            )
+            .await?;
+
+            if let Some(previous_table_id) = previous_table_id {
+                tracing::debug!(
+                    "Register Table: Dropping existing table '{}' in namespace '{:?}' with id {previous_table_id} for overwrite operation",
+                    table.name, table.namespace
+                );
+                // Verify authorization to drop the table first
+                authorizer
+                    .require_table_action(
+                        &request_metadata,
+                        Ok(Some(previous_table_id)),
+                        CatalogTableAction::CanDrop,
+                    )
+                    .await?;
+
+                // Drop the existing table to overwrite it
+                let _previous_table_location =
+                    C::drop_table(previous_table_id, false, t_write.transaction()).await?;
+                // We don't drop the files for the previous table on overwrite
+            }
+        }
+        t_read.commit().await?;
+
         validate_table_properties(table_metadata.properties().keys())?;
         storage_profile.require_allowed_location(&table_location)?;
 
-        let namespace = C::get_namespace(warehouse_id, namespace_id, t.transaction()).await?;
         let tabular_id = TableId::from(table_metadata.uuid());
 
         let CreateTableResponse {
@@ -378,32 +423,60 @@ impl<C: Catalog, A: Authorizer + Clone, S: SecretStore>
             staged_table_id,
         } = C::create_table(
             TableCreation {
-                namespace_id: namespace.namespace_id,
+                namespace_id,
                 table_ident: &table,
                 table_metadata,
                 metadata_location: Some(&metadata_location),
             },
-            t.transaction(),
+            t_write.transaction(),
         )
         .await?;
 
         let config = storage_profile
             .generate_table_config(
-                DataAccess {
-                    vended_credentials: false,
-                    remote_signing: false,
-                },
+                DataAccess::not_specified(),
                 storage_secret.as_ref(),
                 &table_location,
                 StoragePermissions::ReadWriteDelete,
+                &request_metadata,
+                warehouse_id,
+                tabular_id.into(),
             )
             .await?;
 
-        authorizer
-            .create_table(&request_metadata, tabular_id, namespace_id)
-            .await?;
+        let mut auth_needs_delete = false;
+        // Delete the previous table from authorizer if it exists and differs from the new one
+        if let Some(previous_table_id) = previous_table_id {
+            if previous_table_id != tabular_id {
+                auth_needs_delete = true;
+                // Only create authorization for the new table if it's different
+                authorizer
+                    .create_table(&request_metadata, tabular_id, namespace_id)
+                    .await?;
+            }
+        } else {
+            // No previous table, need to create authorization
+            authorizer
+                .create_table(&request_metadata, tabular_id, namespace_id)
+                .await?;
+        }
 
-        t.commit().await?;
+        // Commit the transaction
+        t_write.commit().await?;
+
+        // If we need to delete the previous table from authorizer
+        if auth_needs_delete {
+            if let Some(previous_table_id) = previous_table_id {
+                authorizer.delete_table(previous_table_id).await.map_err({
+                    |e| {
+                        tracing::warn!(
+                            "Failed to delete previous table {previous_table_id} from authorizer on overwrite via table register endpoint: {}",
+                            e.error
+                        );
+                    }
+                }).ok();
+            }
+        }
 
         // If a staged table was overwritten, delete it from authorizer
         if let Some(staged_table_id) = staged_table_id {
@@ -464,7 +537,7 @@ impl<C: Catalog, A: Authorizer + Clone, S: SecretStore>
         let catalog = state.v1_state.catalog;
         let mut t = C::Transaction::begin_read(catalog).await?;
 
-        let (table_id, storage_permissions) = Self::resolve_and_authorize_table_access(
+        let (tabular_details, storage_permissions) = Self::resolve_and_authorize_table_access(
             &request_metadata,
             &table,
             warehouse_id,
@@ -477,20 +550,20 @@ impl<C: Catalog, A: Authorizer + Clone, S: SecretStore>
         // ------------------- BUSINESS LOGIC -------------------
         let mut metadatas = C::load_tables(
             warehouse_id,
-            vec![table_id.ident],
+            vec![tabular_details.ident],
             list_flags.include_deleted,
             t.transaction(),
         )
         .await?;
         t.commit().await?;
         let CatalogLoadTableResult {
-            table_id: _,
+            table_id,
             namespace_id: _,
             table_metadata,
             metadata_location,
             storage_secret_ident,
             storage_profile,
-        } = take_table_metadata(&table_id.ident, &table, &mut metadatas)?;
+        } = take_table_metadata(&tabular_details.ident, &table, &mut metadatas)?;
         require_not_staged(metadata_location.as_ref())?;
 
         let table_location =
@@ -508,6 +581,9 @@ impl<C: Catalog, A: Authorizer + Clone, S: SecretStore>
                         storage_secret.as_ref(),
                         &table_location,
                         storage_permissions,
+                        &request_metadata,
+                        warehouse_id,
+                        table_id.into(),
                     )
                     .await?,
             )
@@ -545,7 +621,7 @@ impl<C: Catalog, A: Authorizer + Clone, S: SecretStore>
         let warehouse_id = require_warehouse_id(prefix)?;
 
         let mut t = C::Transaction::begin_read(state.v1_state.catalog).await?;
-        let (table_id, storage_permissions) = Self::resolve_and_authorize_table_access(
+        let (tabular_details, storage_permissions) = Self::resolve_and_authorize_table_access(
             &request_metadata,
             &table,
             warehouse_id,
@@ -565,7 +641,7 @@ impl<C: Catalog, A: Authorizer + Clone, S: SecretStore>
         ))?;
 
         let (storage_secret_ident, storage_profile) =
-            C::load_storage_profile(warehouse_id, table_id.ident, t.transaction()).await?;
+            C::load_storage_profile(warehouse_id, tabular_details.ident, t.transaction()).await?;
         let storage_secret =
             maybe_get_secret(storage_secret_ident, &state.v1_state.secrets).await?;
         let storage_config = storage_profile
@@ -573,10 +649,13 @@ impl<C: Catalog, A: Authorizer + Clone, S: SecretStore>
                 data_access,
                 storage_secret.as_ref(),
                 &parse_location(
-                    table_id.location.as_str(),
+                    tabular_details.location.as_str(),
                     StatusCode::INTERNAL_SERVER_ERROR,
                 )?,
                 storage_permission,
+                &request_metadata,
+                warehouse_id,
+                tabular_details.table_uuid().into(),
             )
             .await?;
 
@@ -584,7 +663,7 @@ impl<C: Catalog, A: Authorizer + Clone, S: SecretStore>
             vec![]
         } else {
             vec![StorageCredential {
-                prefix: table_id.location.clone(),
+                prefix: tabular_details.location.clone(),
                 config: storage_config.creds.into(),
             }]
         };
@@ -1989,7 +2068,7 @@ pub(crate) mod test {
                     name: "tab-1".to_string(),
                 },
             },
-            DataAccess::none(),
+            DataAccess::not_specified(),
             ctx.clone(),
             RequestMetadata::new_unauthenticated(),
         )
@@ -2144,7 +2223,7 @@ pub(crate) mod test {
                     name: "tab-1".to_string(),
                 },
             },
-            DataAccess::none(),
+            DataAccess::not_specified(),
             ctx.clone(),
             RequestMetadata::new_unauthenticated(),
         )
@@ -2205,7 +2284,7 @@ pub(crate) mod test {
                     name: "tab-1".to_string(),
                 },
             },
-            DataAccess::none(),
+            DataAccess::not_specified(),
             ctx.clone(),
             RequestMetadata::new_unauthenticated(),
         )
@@ -2279,13 +2358,13 @@ pub(crate) mod test {
 
         let tab = CatalogServer::load_table(
             TableParameters {
-                prefix: ns_params.prefix,
+                prefix: ns_params.prefix.clone(),
                 table: TableIdent {
                     namespace: ns.namespace.clone(),
                     name: "tab-1".to_string(),
                 },
             },
-            DataAccess::none(),
+            DataAccess::not_specified(),
             ctx.clone(),
             RequestMetadata::new_unauthenticated(),
         )
@@ -2331,7 +2410,7 @@ pub(crate) mod test {
                 prefix: ns_params.prefix.clone(),
                 table: table_ident.clone(),
             },
-            DataAccess::none(),
+            DataAccess::not_specified(),
             ctx.clone(),
             RequestMetadata::new_unauthenticated(),
         )
@@ -2373,7 +2452,7 @@ pub(crate) mod test {
                 prefix: ns_params.prefix.clone(),
                 table: table_ident.clone(),
             },
-            DataAccess::none(),
+            DataAccess::not_specified(),
             ctx.clone(),
             RequestMetadata::new_unauthenticated(),
         )
@@ -2416,7 +2495,7 @@ pub(crate) mod test {
                 prefix: ns_params.prefix,
                 table: table_ident.clone(),
             },
-            DataAccess::none(),
+            DataAccess::not_specified(),
             ctx.clone(),
             RequestMetadata::new_unauthenticated(),
         )
@@ -2494,7 +2573,7 @@ pub(crate) mod test {
                 prefix: ns_params.prefix.clone(),
                 table: table_ident.clone(),
             },
-            DataAccess::none(),
+            DataAccess::not_specified(),
             ctx.clone(),
             RequestMetadata::new_unauthenticated(),
         )
@@ -2556,7 +2635,7 @@ pub(crate) mod test {
                 prefix: ns_params.prefix.clone(),
                 table: table_ident.clone(),
             },
-            DataAccess::none(),
+            DataAccess::not_specified(),
             ctx.clone(),
             RequestMetadata::new_unauthenticated(),
         )
@@ -2613,7 +2692,7 @@ pub(crate) mod test {
                 prefix: ns_params.prefix.clone(),
                 table: table_ident.clone(),
             },
-            DataAccess::none(),
+            DataAccess::not_specified(),
             ctx.clone(),
             RequestMetadata::new_unauthenticated(),
         )
@@ -2651,7 +2730,7 @@ pub(crate) mod test {
                 prefix: ns_params.prefix.clone(),
                 table: table_ident.clone(),
             },
-            DataAccess::none(),
+            DataAccess::not_specified(),
             ctx.clone(),
             RequestMetadata::new_unauthenticated(),
         )
@@ -2740,7 +2819,7 @@ pub(crate) mod test {
         let _ = CatalogServer::create_table(
             ns_params.clone(),
             create_request_1,
-            DataAccess::none(),
+            DataAccess::not_specified(),
             ctx.clone(),
             RequestMetadata::new_unauthenticated(),
         )
@@ -2750,7 +2829,7 @@ pub(crate) mod test {
         CatalogServer::create_table(
             ns_params.clone(),
             create_request_2,
-            DataAccess::none(),
+            DataAccess::not_specified(),
             ctx.clone(),
             RequestMetadata::new_unauthenticated(),
         )
@@ -2770,7 +2849,7 @@ pub(crate) mod test {
         let _ = CatalogServer::create_table(
             ns_params.clone(),
             create_request_1,
-            DataAccess::none(),
+            DataAccess::not_specified(),
             ctx.clone(),
             RequestMetadata::new_unauthenticated(),
         )
@@ -2780,7 +2859,7 @@ pub(crate) mod test {
         CatalogServer::create_table(
             ns_params.clone(),
             create_request_2,
-            DataAccess::none(),
+            DataAccess::not_specified(),
             ctx.clone(),
             RequestMetadata::new_unauthenticated(),
         )
@@ -2800,7 +2879,7 @@ pub(crate) mod test {
         let _ = CatalogServer::create_table(
             ns_params.clone(),
             create_request_1,
-            DataAccess::none(),
+            DataAccess::not_specified(),
             ctx.clone(),
             RequestMetadata::new_unauthenticated(),
         )
@@ -2810,7 +2889,7 @@ pub(crate) mod test {
         let e = CatalogServer::create_table(
             ns_params.clone(),
             create_request_2,
-            DataAccess::none(),
+            DataAccess::not_specified(),
             ctx.clone(),
             RequestMetadata::new_unauthenticated(),
         )
@@ -2833,7 +2912,7 @@ pub(crate) mod test {
         let _ = CatalogServer::create_table(
             ns_params.clone(),
             create_request_1,
-            DataAccess::none(),
+            DataAccess::not_specified(),
             ctx.clone(),
             RequestMetadata::new_unauthenticated(),
         )
@@ -2843,7 +2922,7 @@ pub(crate) mod test {
         let e = CatalogServer::create_table(
             ns_params.clone(),
             create_request_2,
-            DataAccess::none(),
+            DataAccess::not_specified(),
             ctx.clone(),
             RequestMetadata::new_unauthenticated(),
         )
@@ -2866,7 +2945,7 @@ pub(crate) mod test {
         let _ = CatalogServer::create_table(
             ns_params.clone(),
             create_request_1,
-            DataAccess::none(),
+            DataAccess::not_specified(),
             ctx.clone(),
             RequestMetadata::new_unauthenticated(),
         )
@@ -2876,7 +2955,7 @@ pub(crate) mod test {
         let e = CatalogServer::create_table(
             ns_params.clone(),
             create_request_2,
-            DataAccess::none(),
+            DataAccess::not_specified(),
             ctx.clone(),
             RequestMetadata::new_unauthenticated(),
         )
@@ -2898,7 +2977,7 @@ pub(crate) mod test {
         let _ = CatalogServer::create_table(
             ns_params.clone(),
             create_request_1,
-            DataAccess::none(),
+            DataAccess::not_specified(),
             ctx.clone(),
             RequestMetadata::new_unauthenticated(),
         )
@@ -2908,7 +2987,7 @@ pub(crate) mod test {
         let e = CatalogServer::create_table(
             ns_params.clone(),
             create_request_2,
-            DataAccess::none(),
+            DataAccess::not_specified(),
             ctx.clone(),
             RequestMetadata::new_unauthenticated(),
         )
@@ -2955,7 +3034,7 @@ pub(crate) mod test {
             let tab = CatalogServer::create_table(
                 ns_params.clone(),
                 create_request,
-                DataAccess::none(),
+                DataAccess::not_specified(),
                 ctx.clone(),
                 RequestMetadata::new_unauthenticated(),
             )
@@ -3196,7 +3275,7 @@ pub(crate) mod test {
         let tab = CatalogServer::create_table(
             ns_params.clone(),
             create_request(Some("tab-1".to_string()), Some(false)),
-            DataAccess::none(),
+            DataAccess::not_specified(),
             ctx.clone(),
             RequestMetadata::new_unauthenticated(),
         )
@@ -3265,7 +3344,7 @@ pub(crate) mod test {
         let tab = CatalogServer::create_table(
             ns_params.clone(),
             create_request(Some("tab-1".to_string()), Some(false)),
-            DataAccess::none(),
+            DataAccess::not_specified(),
             ctx.clone(),
             RequestMetadata::new_unauthenticated(),
         )
@@ -3296,5 +3375,122 @@ pub(crate) mod test {
         )
         .await
         .expect("Table couldn't be force dropped which should be possible");
+    }
+
+    #[sqlx::test]
+    async fn test_register_table_with_overwrite(pool: PgPool) {
+        let (ctx, ns, ns_params, _) = table_test_setup(pool).await;
+
+        // Create a table first
+        let initial_table = CatalogServer::create_table(
+            ns_params.clone(),
+            create_request(Some("test_overwrite".to_string()), Some(false)),
+            DataAccess::not_specified(),
+            ctx.clone(),
+            RequestMetadata::new_unauthenticated(),
+        )
+        .await
+        .unwrap();
+
+        // Verify the table exists
+        let table_ident = TableIdent {
+            namespace: ns.namespace.clone(),
+            name: "test_overwrite".to_string(),
+        };
+
+        CatalogServer::table_exists(
+            TableParameters {
+                prefix: ns_params.prefix.clone(),
+                table: table_ident.clone(),
+            },
+            ctx.clone(),
+            RequestMetadata::new_unauthenticated(),
+        )
+        .await
+        .unwrap();
+
+        // Now create a second table to use for the overwrite test
+        let second_table = CatalogServer::create_table(
+            ns_params.clone(),
+            create_request(Some("second_table".to_string()), Some(false)),
+            DataAccess::not_specified(),
+            ctx.clone(),
+            RequestMetadata::new_unauthenticated(),
+        )
+        .await
+        .unwrap();
+
+        // Drop second table, keep data
+        CatalogServer::drop_table(
+            TableParameters {
+                prefix: ns_params.prefix.clone(),
+                table: TableIdent {
+                    namespace: ns.namespace.clone(),
+                    name: "second_table".to_string(),
+                },
+            },
+            DropParams {
+                purge_requested: false,
+                force: false,
+            },
+            ctx.clone(),
+            RequestMetadata::new_unauthenticated(),
+        )
+        .await
+        .expect("Failed to drop second table");
+
+        // Test without overwrite flag - should fail
+        let register_request = iceberg_ext::catalog::rest::RegisterTableRequest::builder()
+            .name("test_overwrite".to_string())
+            .metadata_location(second_table.metadata_location.as_ref().unwrap().to_string())
+            .build();
+
+        CatalogServer::register_table(
+            ns_params.clone(),
+            register_request.clone(),
+            ctx.clone(),
+            RequestMetadata::new_unauthenticated(),
+        )
+        .await
+        .expect_err("Registration should fail without overwrite flag");
+
+        // Test with overwrite flag - should succeed
+        let register_request_with_overwrite =
+            iceberg_ext::catalog::rest::RegisterTableRequest::builder()
+                .name("test_overwrite".to_string())
+                .metadata_location(second_table.metadata_location.as_ref().unwrap().to_string())
+                .overwrite(true)
+                .build();
+
+        let result = CatalogServer::register_table(
+            ns_params.clone(),
+            register_request_with_overwrite,
+            ctx.clone(),
+            RequestMetadata::new_unauthenticated(),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "Registration with overwrite flag should succeed, but failed with: {:?}",
+            result.err().map(|e| e.error.message)
+        );
+
+        // Verify the table exists and has the new metadata
+        let loaded_table = CatalogServer::load_table(
+            TableParameters {
+                prefix: ns_params.prefix,
+                table: table_ident,
+            },
+            DataAccess::not_specified(),
+            ctx.clone(),
+            RequestMetadata::new_unauthenticated(),
+        )
+        .await
+        .unwrap();
+
+        // The loaded table should have the UUID and content of the second table
+        assert_eq!(loaded_table.metadata.uuid(), second_table.metadata.uuid());
+        assert_ne!(loaded_table.metadata.uuid(), initial_table.metadata.uuid());
     }
 }
