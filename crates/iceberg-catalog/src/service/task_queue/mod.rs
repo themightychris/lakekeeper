@@ -196,7 +196,7 @@ impl TaskQueues {
         }
         let (res, index, _) = futures::future::select_all(queue_tasks).await;
         if let Err(e) = res {
-            tracing::error!("Task queue {index} panicked: {e}");
+            tracing::error!(?e, "Task queue {index} panicked: {e}");
             return Err(anyhow::anyhow!("Task queue {index} panicked: {e}"));
         }
         tracing::error!("Task queue {index} exited unexpectedly");
