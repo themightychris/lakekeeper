@@ -2213,7 +2213,17 @@ paths:
             type: string
       responses:
         '200':
-          $ref: '#/components/schemas/ExpirationQueueConfig'
+          description: ''
+          headers:
+            x-request-id:
+              schema:
+                type: string
+                format: uuid
+              description: Request identifier, add this to your bug reports.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExpirationQueueConfig'
         4XX:
           description: ''
           content:
@@ -2267,7 +2277,17 @@ paths:
             type: string
       responses:
         '200':
-          $ref: '#/components/schemas/PurgeQueueConfig'
+          description: ''
+          headers:
+            x-request-id:
+              schema:
+                type: string
+                format: uuid
+              description: Request identifier, add this to your bug reports.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PurgeQueueConfig'
         4XX:
           description: ''
           content:
