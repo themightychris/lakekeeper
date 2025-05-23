@@ -31,7 +31,7 @@ use crate::{
     service::{
         authz::{Authorizer, CatalogProjectAction, CatalogWarehouseAction},
         secrets::SecretStore,
-        task_queue::{TaskFilter, DESER},
+        task_queue::TaskFilter,
         Catalog, ListFlags, NamespaceId, State, TableId, TabularId, Transaction,
     },
     ProjectId, WarehouseId, DEFAULT_PROJECT_ID,
