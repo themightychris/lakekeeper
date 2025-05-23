@@ -1605,7 +1605,9 @@ pub mod v1 {
             let path = ManagementV1Endpoint::SetTaskQueueConfig
                 .path()
                 .replace("{queue_name}", q_name);
+
             let mut p = config_path.clone();
+
             let Some(post) = p.post.as_mut() else {
                 tracing::warn!(
                     "No post method found for '{}', not patching queue configs into the ApiDoc.",
@@ -1613,6 +1615,10 @@ pub mod v1 {
                 );
                 return doc;
             };
+            post.operation_id = Some(format!(
+                "set_task_queue_config_{}",
+                q_name.replace("-", "_")
+            ));
             let Some(body) = post.request_body.as_mut() else {
                 tracing::warn!(
                     "No request body found for the '{}', not patching queue configs into the ApiDoc.",
@@ -1637,6 +1643,10 @@ pub mod v1 {
                 );
                 return doc;
             };
+            get.operation_id = Some(format!(
+                "get_task_queue_config_{}",
+                q_name.replace("-", "_")
+            ));
             get.responses.responses.insert(
                 "200".to_string(),
                 RefOr::Ref(

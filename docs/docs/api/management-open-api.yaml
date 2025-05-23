@@ -2198,7 +2198,7 @@ paths:
       tags:
         - warehouse
       summary: Get task-queue config
-      operationId: get_task_queue_config
+      operationId: get_task_queue_config_tabular_expiration
       parameters:
         - name: warehouse_id
           in: path
@@ -2224,7 +2224,7 @@ paths:
       tags:
         - warehouse
       summary: Set task-queue config
-      operationId: set_task_queue_config
+      operationId: set_task_queue_config_tabular_expiration
       parameters:
         - name: warehouse_id
           in: path
@@ -2252,7 +2252,7 @@ paths:
       tags:
         - warehouse
       summary: Get task-queue config
-      operationId: get_task_queue_config
+      operationId: get_task_queue_config_tabular_purge
       parameters:
         - name: warehouse_id
           in: path
@@ -2278,7 +2278,7 @@ paths:
       tags:
         - warehouse
       summary: Set task-queue config
-      operationId: set_task_queue_config
+      operationId: set_task_queue_config_tabular_purge
       parameters:
         - name: warehouse_id
           in: path
