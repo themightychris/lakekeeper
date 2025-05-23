@@ -38,7 +38,7 @@ pub mod v1 {
         User,
     };
     use utoipa::{
-        openapi::{security::SecurityScheme, RefOr, Schema},
+        openapi::{security::SecurityScheme, KnownFormat, RefOr, Schema},
         OpenApi, ToSchema,
     };
     use view::ViewManagementService as _;
@@ -1647,14 +1647,35 @@ pub mod v1 {
                 "get_task_queue_config_{}",
                 q_name.replace("-", "_")
             ));
-            get.responses.responses.insert(
-                "200".to_string(),
-                RefOr::Ref(
-                    utoipa::openapi::schema::RefBuilder::new()
-                        .ref_location_from_schema_name(name.to_string())
+            let response = utoipa::openapi::response::ResponseBuilder::new()
+                .content(
+                    "application/json",
+                    utoipa::openapi::content::ContentBuilder::new()
+                        .schema(Some(RefOr::Ref(
+                            utoipa::openapi::schema::RefBuilder::new()
+                                .ref_location_from_schema_name(name.to_string())
+                                .build(),
+                        )))
                         .build(),
-                ),
-            );
+                )
+                .header(
+                    "x-request-id",
+                    utoipa::openapi::HeaderBuilder::new()
+                        .schema(
+                            utoipa::openapi::schema::Object::builder()
+                                .schema_type(utoipa::openapi::schema::SchemaType::new(
+                                    utoipa::openapi::schema::Type::String,
+                                ))
+                                .format(Some(utoipa::openapi::schema::SchemaFormat::KnownFormat(
+                                    KnownFormat::Uuid,
+                                ))),
+                        )
+                        .description(Some("Request identifier, add this to your bug reports."))
+                        .build(),
+                );
+            get.responses
+                .responses
+                .insert("200".to_string(), RefOr::T(response.build()));
 
             paths.insert(path, p);
 
