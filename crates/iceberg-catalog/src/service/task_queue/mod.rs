@@ -343,7 +343,7 @@ pub enum TaskStatus {
 pub enum TaskOutcome {
     Failed,
     Cancelled,
-    Completed,
+    Success,
 }
 
 #[derive(Debug)]

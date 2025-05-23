@@ -1,5 +1,5 @@
 create type entity_type as enum ('tabular');
-create type task_final_status as enum ('failed', 'cancelled', 'completed');
+create type task_final_status as enum ('failed', 'cancelled', 'success');
 
 alter table task
     rename column suspend_until to scheduled_for;
@@ -48,7 +48,6 @@ create table task_config
     queue_name   text                                                       not null,
     config       jsonb                                                      not null,
     max_age      interval,
-    -- TODO: add poll interval / max_age etc here?
     primary key (warehouse_id, queue_name)
 );
 

@@ -251,7 +251,7 @@ pub(crate) async fn record_success(
         "#,
         *id,
         message,
-        TaskOutcome::Completed as _,
+        TaskOutcome::Success as _,
     )
     .execute(pool)
     .await

@@ -201,12 +201,15 @@ pub fn new_full_router<
 
 fn maybe_merge_swagger_router<C: Catalog, A: Authorizer + Clone, S: SecretStore>(
     router: Router<ApiContext<State<A, C, S>>>,
-    queue_configs: Vec<(&'static str, String, RefOr<Schema>)>
+    queue_configs: Vec<(&'static str, String, RefOr<Schema>)>,
 ) -> Router<ApiContext<State<A, C, S>>> {
     if CONFIG.serve_swagger_ui {
         router.merge(
             utoipa_swagger_ui::SwaggerUi::new("/swagger-ui")
-                .url("/api-docs/management/v1/openapi.json", v1_api_doc::<A>(queue_configs))
+                .url(
+                    "/api-docs/management/v1/openapi.json",
+                    v1_api_doc::<A>(queue_configs),
+                )
                 .external_url_unchecked(
                     "/api-docs/catalog/v1/openapi.json",
                     ICEBERG_OPENAPI_SPEC_YAML.clone(),
