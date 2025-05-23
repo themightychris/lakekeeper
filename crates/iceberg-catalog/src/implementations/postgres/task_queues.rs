@@ -190,7 +190,7 @@ pub(crate) async fn pick_task(
     .fetch_optional(pool)
     .await
     .map_err(|e| {
-        tracing::error!(?e, "Failed to pick a task");
+        tracing::error!(?e, "Failed to pick a task for '{queue_name}'");
         e.into_error_model(format!("Failed to pick a '{queue_name}' task"))
     })?;
 
@@ -219,7 +219,7 @@ pub(crate) async fn pick_task(
 }
 
 pub(crate) async fn record_success(
-    id: TaskId,
+    task_id: TaskId,
     pool: &mut PgConnection,
     message: Option<&str>,
 ) -> Result<(), IcebergErrorResponse> {
@@ -253,7 +253,7 @@ pub(crate) async fn record_success(
         DELETE FROM task
         WHERE task_id = $1
         "#,
-        *id,
+        *task_id,
         message,
         TaskOutcome::Success as _,
     )
@@ -265,7 +265,7 @@ pub(crate) async fn record_success(
 
 pub(crate) async fn record_failure(
     conn: &mut PgConnection,
-    id: TaskId,
+    task_id: TaskId,
     max_retries: i32,
     details: &str,
 ) -> Result<(), IcebergErrorResponse> {
@@ -276,7 +276,7 @@ pub(crate) async fn record_failure(
         WHERE task_id = $2
         "#,
         max_retries,
-        *id
+        *task_id
     )
     .fetch_optional(&mut *conn)
     .await
@@ -294,7 +294,7 @@ pub(crate) async fn record_failure(
             DELETE FROM task
             WHERE task_id = $1
             "#,
-            *id,
+            *task_id,
             TaskOutcome::Failed as _,
         )
         .execute(conn)
@@ -312,7 +312,7 @@ pub(crate) async fn record_failure(
             SET status = $3
             WHERE task_id = $1
             "#,
-            *id,
+            *task_id,
             details,
             TaskStatus::Scheduled as _,
             TaskOutcome::Failed as _,
