@@ -58,8 +58,7 @@ pub mod v1 {
                 project::{EndpointStatisticsResponse, GetEndpointStatisticsRequest},
                 user::{ListUsersQuery, ListUsersResponse},
                 warehouse::{
-                    GetTaskQueueConfigResponse, QueueConfig, QueueConfigResponse,
-                    SetTaskQueueConfigRequest, UndropTabularsRequest,
+                    GetTaskQueueConfigResponse, SetTaskQueueConfigRequest, UndropTabularsRequest,
                 },
             },
             ApiContext, IcebergErrorResponse, Result,
@@ -1587,83 +1586,57 @@ pub mod v1 {
         queue_configs: Vec<(&'static str, String, RefOr<Schema>)>,
     ) -> utoipa::openapi::OpenApi {
         let mut doc = ManagementApiDoc::openapi();
+        doc.merge(A::api_doc());
+
         let Some(comps) = doc.components.as_mut() else {
             tracing::warn!(
                 "No components found in the OpenAPI document, not patching queue configs in."
             );
             return doc;
         };
-        let mut q_ref_names = vec![];
-        let mut one_of_builder = utoipa::openapi::OneOfBuilder::new();
-        let mut response_one_of_builder = utoipa::openapi::OneOfBuilder::new();
-        for (q_name, name, q) in queue_configs {
-            let config_response_name = format!("{name}Response");
+        let paths = &mut doc.paths.paths;
+        let Some(config_path) = paths.remove(ManagementV1Endpoint::SetTaskQueueConfig.path())
+        else {
+            tracing::warn!("No path found for SetTaskQueueConfig, not patching queue configs in.");
+            return doc;
+        };
 
-            let all_of_builder = utoipa::openapi::AllOfBuilder::new()
-                .item(RefOr::Ref(
-                    utoipa::openapi::schema::RefBuilder::new()
-                        .ref_location_from_schema_name(name.to_string())
-                        .build(),
-                ))
-                .item(
-                    utoipa::openapi::schema::Object::builder()
-                        .property(
-                            "queue-name",
-                            utoipa::openapi::schema::Object::builder()
-                                .schema_type(utoipa::openapi::schema::SchemaType::new(
-                                    utoipa::openapi::schema::Type::String,
-                                ))
-                                .enum_values::<[&str; 1usize], &str>(Some([q_name])),
-                        )
-                        .required("queue-name"),
-                );
+        for (q_name, name, q) in queue_configs {
+            let path = ManagementV1Endpoint::SetTaskQueueConfig
+                .path()
+                .replace("{queue_name}", q_name);
+            let mut p = config_path.clone();
+            let post = p.post.as_mut().unwrap();
+            let body = post.request_body.as_mut().unwrap();
+            body.content.insert(
+                "application/json".to_string(),
+                utoipa::openapi::ContentBuilder::new()
+                    .schema(Some(RefOr::Ref(
+                        utoipa::openapi::schema::RefBuilder::new()
+                            .ref_location_from_schema_name(name.to_string())
+                            .build(),
+                    )))
+                    .build(),
+            );
+            let get = p.get.as_mut().unwrap();
+            let _ = get
+                .responses
+                .responses
+                .insert(
+                    "200".to_string(),
+                    RefOr::Ref(
+                        utoipa::openapi::schema::RefBuilder::new()
+                            .ref_location_from_schema_name(name.to_string())
+                            .build(),
+                    ),
+                )
+                .unwrap();
+
+            paths.insert(path, p);
 
             comps.schemas.insert(name.to_string(), q.clone());
-            comps.schemas.insert(
-                config_response_name.clone(),
-                RefOr::T(Schema::AllOf(all_of_builder.build())),
-            );
-            q_ref_names.push((q_name, name.to_string()));
-            one_of_builder = one_of_builder.item(RefOr::Ref(
-                utoipa::openapi::schema::RefBuilder::new()
-                    .ref_location_from_schema_name(name.to_string())
-                    .build(),
-            ));
-            response_one_of_builder = response_one_of_builder.item(RefOr::Ref(
-                utoipa::openapi::schema::RefBuilder::new()
-                    .ref_location_from_schema_name(config_response_name)
-                    .build(),
-            ));
-        }
-        if comps
-            .schemas
-            .insert(
-                QueueConfig::name().to_string(),
-                RefOr::T(Schema::OneOf(one_of_builder.build())),
-            )
-            .is_none()
-        {
-            tracing::warn!(
-                "No components with name '{}' found in the OpenAPI document, not patching queue configs in.",
-                QueueConfig::name()
-            );
         }
 
-        if comps
-            .schemas
-            .insert(
-                QueueConfigResponse::name().to_string(),
-                RefOr::T(Schema::OneOf(response_one_of_builder.build())),
-            )
-            .is_none()
-        {
-            tracing::warn!(
-                "No components with name '{}' found in the OpenAPI document, not patching queue configs in.",
-                QueueConfig::name()
-            );
-        }
-
-        doc.merge(A::api_doc());
         doc
     }
 

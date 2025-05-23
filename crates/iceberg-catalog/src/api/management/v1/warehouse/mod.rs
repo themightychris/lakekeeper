@@ -960,19 +960,21 @@ pub trait Service<C: Catalog, A: Authorizer, S: SecretStore> {
         // TODO: authz
         let mut transaction = C::Transaction::begin_write(context.v1_state.catalog).await?;
 
-        if let Some(validator) = crate::service::task_queue::DESER
+        if let Some(queue) = crate::service::task_queue::RUNNING_QUEUES
             .get()
             .and_then(|val| val.get(queue_name.as_str()))
         {
-            validator(request.queue_config.0.clone()).map_err(|e| {
-                ErrorModel::bad_request(
-                    format!(
+            queue
+                .validate_config(request.queue_config.0.clone())
+                .map_err(|e| {
+                    ErrorModel::bad_request(
+                        format!(
                         "Failed to deserialize queue config for queue-name '{queue_name}': '{e}'"
                     ),
-                    "InvalidQueueConfig",
-                    None,
-                )
-            })?;
+                        "InvalidQueueConfig",
+                        None,
+                    )
+                })?;
         } else {
             tracing::info!("No validator found for queue {queue_name}");
         }

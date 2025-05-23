@@ -24,33 +24,46 @@ use crate::service::{
 pub mod tabular_expiration_queue;
 pub mod tabular_purge_queue;
 
+pub const DEFAULT_MAX_AGE: chrono::Duration = valid_max_age(3600);
+pub const DEFAULT_MAX_RETRIES: i32 = 5;
+pub const DEFAULT_NUM_WORKERS: usize = 2;
+
+pub type TaskQueueProducer = Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync + 'static>;
+pub type ValidatorFn = Arc<dyn Fn(serde_json::Value) -> serde_json::Result<()> + Send + Sync>;
+pub(crate) static RUNNING_QUEUES: OnceLock<HashMap<&'static str, Queue>> = OnceLock::new();
+
 pub trait QueueConfig: ToSchema + Serialize + DeserializeOwned {
     fn max_age(&self) -> chrono::Duration {
         DEFAULT_MAX_AGE
     }
     fn max_retries(&self) -> i32 {
-        5
+        DEFAULT_MAX_RETRIES
     }
     fn num_workers(&self) -> usize {
-        2
+        DEFAULT_NUM_WORKERS
     }
 }
 
-pub type TaskQueueProducer = Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync + 'static>;
-pub type ValidatorFn = Box<dyn Fn(serde_json::Value) -> serde_json::Result<()> + Send + Sync>;
-
-pub(crate) static DESER: OnceLock<HashMap<&'static str, ValidatorFn>> = OnceLock::new();
-
-#[derive(Clone)]
-struct RegisteredQueue {
-    pub queue_task: TaskQueueProducer,
+#[derive(Clone, Serialize, ToSchema)]
+pub struct Queue {
+    #[serde(skip)]
+    validator_fn: ValidatorFn,
+    queue_name: String,
     num_workers: usize,
 }
 
-impl Debug for RegisteredQueue {
+impl Queue {
+    /// Validates the incoming config payload against the `validator_fn`.
+    pub fn validate_config(&self, payload: serde_json::Value) -> Result<(), serde_json::Error> {
+        (self.validator_fn)(payload)
+    }
+}
+
+impl Debug for Queue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RegisteredQueue")
-            .field("queue_task", &"Fn(...)")
+        f.debug_struct("Queue")
+            .field("validator_fn", &"Fn(...)")
+            .field("queue_name", &self.queue_name)
             .field("num_workers", &self.num_workers)
             .finish()
     }
@@ -94,7 +107,7 @@ impl TaskQueues {
         num_workers: usize,
     ) {
         let des = |v| serde_json::from_value::<T>(v).map(|_| ());
-        self.schema_validators.insert(queue_name, Box::new(des));
+        self.schema_validators.insert(queue_name, Arc::new(des));
         self.schemas.push((
             queue_name,
             T::name().to_string(),
@@ -173,10 +186,7 @@ impl TaskQueues {
     pub async fn spawn_queues(mut self) -> Result<(), anyhow::Error> {
         let mut queue_tasks = vec![];
         let mut qs = HashMap::with_capacity(0);
-        DESER.set(self.schema_validators).map_err(|_| {
-            tracing::error!("Failed to set schema validators");
-            anyhow::anyhow!("Failed to set schema validators")
-        })?;
+        let mut queue_info = HashMap::with_capacity(self.registered_queues.len());
 
         std::mem::swap(&mut self.registered_queues, &mut qs);
         for (
@@ -193,7 +203,23 @@ impl TaskQueues {
                 let task_fut = task_fn();
                 queue_tasks.push(tokio::task::spawn(task_fut));
             }
+            queue_info.insert(
+                name,
+                Queue {
+                    validator_fn: self
+                        .schema_validators
+                        .remove(name)
+                        .ok_or(anyhow::anyhow!("Validator function not found"))?,
+                    queue_name: name.to_string(),
+                    num_workers,
+                },
+            );
         }
+
+        RUNNING_QUEUES.set(queue_info).map_err(|_| {
+            tracing::error!("Failed to set schema validators");
+            anyhow::anyhow!("Failed to set schema validators")
+        })?;
         let (res, index, _) = futures::future::select_all(queue_tasks).await;
         if let Err(e) = res {
             tracing::error!(?e, "Task queue {index} panicked: {e}");
@@ -201,6 +227,21 @@ impl TaskQueues {
         }
         tracing::error!("Task queue {index} exited unexpectedly");
         Err(anyhow::anyhow!("Task queue {index} exited unexpectedly"))
+    }
+}
+
+#[derive(Clone)]
+struct RegisteredQueue {
+    pub queue_task: TaskQueueProducer,
+    num_workers: usize,
+}
+
+impl Debug for RegisteredQueue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegisteredQueue")
+            .field("queue_task", &"Fn(...)")
+            .field("num_workers", &self.num_workers)
+            .finish()
     }
 }
 
@@ -382,36 +423,6 @@ pub(crate) async fn record_error_with_catalog<C: Catalog>(
         tracing::error!("Failed to commit transaction: {:?}", e);
     });
 }
-
-// #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-// pub struct TaskQueueConfig {
-//     pub max_retries: i32,
-//     #[serde(
-//         deserialize_with = "crate::config::seconds_to_duration",
-//         serialize_with = "crate::config::duration_to_seconds"
-//     )]
-//     pub max_age: chrono::Duration,
-//     #[serde(
-//         deserialize_with = "crate::config::seconds_to_std_duration",
-//         serialize_with = "crate::config::serialize_std_duration_as_ms"
-//     )]
-//     pub poll_interval: Duration,
-//     pub num_workers: usize,
-// }
-
-pub const DEFAULT_MAX_AGE: chrono::Duration = valid_max_age(3600);
-pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(10);
-
-// impl Default for TaskQueueConfig {
-//     fn default() -> Self {
-//         Self {
-//             max_retries: 5,
-//             max_age: valid_max_age(3600),
-//             poll_interval: Duration::from_secs(10),
-//             num_workers: 2,
-//         }
-//     }
-// }
 
 const fn valid_max_age(num: i64) -> chrono::Duration {
     assert!(num > 0, "max_age must be greater than 0");

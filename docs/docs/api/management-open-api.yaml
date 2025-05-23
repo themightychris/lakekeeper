@@ -2193,7 +2193,7 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/IcebergErrorResponse'
-  /management/v1/{warehouse_id}/task-queue/{queue_name}/config:
+  /management/v1/{warehouse_id}/task-queue/tabular_expiration/config:
     get:
       tags:
         - warehouse
@@ -2213,11 +2213,7 @@ paths:
             type: string
       responses:
         '200':
-          description: ''
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GetTaskQueueConfigResponse'
+          $ref: '#/components/schemas/ExpirationQueueConfig'
         4XX:
           description: ''
           content:
@@ -2240,7 +2236,61 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/SetTaskQueueConfigRequest'
+              $ref: '#/components/schemas/ExpirationQueueConfig'
+        required: true
+      responses:
+        '204':
+          description: Task queue config set successfully
+        4XX:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IcebergErrorResponse'
+  /management/v1/{warehouse_id}/task-queue/tabular_purge/config:
+    get:
+      tags:
+        - warehouse
+      summary: Get task-queue config
+      operationId: get_task_queue_config
+      parameters:
+        - name: warehouse_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: queue_name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          $ref: '#/components/schemas/PurgeQueueConfig'
+        4XX:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IcebergErrorResponse'
+    post:
+      tags:
+        - warehouse
+      summary: Set task-queue config
+      operationId: set_task_queue_config
+      parameters:
+        - name: warehouse_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PurgeQueueConfig'
         required: true
       responses:
         '204':
@@ -2777,17 +2827,6 @@ components:
           description: Internal type definition of the error
     ExpirationQueueConfig:
       type: object
-    ExpirationQueueConfigResponse:
-      allOf:
-        - $ref: '#/components/schemas/ExpirationQueueConfig'
-        - type: object
-          required:
-            - queue-name
-          properties:
-            queue-name:
-              type: string
-              enum:
-                - tabular_expiration
     GcsCredential:
       oneOf:
         - type: object
@@ -3459,25 +3498,16 @@ components:
           description: Updated at
     PurgeQueueConfig:
       type: object
-    PurgeQueueConfigResponse:
+    QueueConfig: {}
+    QueueConfigResponse:
       allOf:
-        - $ref: '#/components/schemas/PurgeQueueConfig'
+        - {}
         - type: object
           required:
             - queue-name
           properties:
             queue-name:
               type: string
-              enum:
-                - tabular_purge
-    QueueConfig:
-      oneOf:
-        - $ref: '#/components/schemas/PurgeQueueConfig'
-        - $ref: '#/components/schemas/ExpirationQueueConfig'
-    QueueConfigResponse:
-      oneOf:
-        - $ref: '#/components/schemas/PurgeQueueConfigResponse'
-        - $ref: '#/components/schemas/ExpirationQueueConfigResponse'
     RenameProjectRequest:
       type: object
       required:
@@ -3889,6 +3919,7 @@ components:
         - aws-system-identities-enabled
         - azure-system-identities-enabled
         - gcp-system-identities-enabled
+        - queues
       properties:
         authz-backend:
           $ref: '#/components/schemas/AuthZBackend'
@@ -3910,6 +3941,11 @@ components:
         gcp-system-identities-enabled:
           type: boolean
           description: If using GCP system identities for GCS storage profiles are enabled.
+        queues:
+          type: array
+          items:
+            type: string
+          description: List of queues that are registered for the server.
         server-id:
           type: string
           format: uuid
