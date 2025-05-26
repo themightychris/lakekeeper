@@ -23,12 +23,13 @@ use crate::{
         authn::{auth_middleware_fn, AuthMiddlewareState},
         authz::Authorizer,
         contract_verification::ContractVerifiers,
-        event_publisher::CloudEventsPublisher,
+        endpoint_hooks::EndpointHookCollection,
         health::ServiceHealthProvider,
         task_queue::TaskQueues,
         Catalog, EndpointStatisticsTrackerTx, SecretStore, State,
     },
     tracing::{MakeRequestUuid7, RestMakeSpan},
+    CONFIG,
 };
 
 static ICEBERG_OPENAPI_SPEC_YAML: LazyLock<serde_json::Value> = LazyLock::new(|| {
@@ -44,12 +45,12 @@ pub struct RouterArgs<C: Catalog, A: Authorizer + Clone, S: SecretStore, N: Auth
     pub catalog_state: C::State,
     pub secrets_state: S,
     pub queues: TaskQueues,
-    pub publisher: CloudEventsPublisher,
     pub table_change_checkers: ContractVerifiers,
     pub service_health_provider: ServiceHealthProvider,
     pub cors_origins: Option<&'static [HeaderValue]>,
     pub metrics_layer: Option<PrometheusMetricLayer<'static>>,
     pub endpoint_statistics_tracker_tx: EndpointStatisticsTrackerTx,
+    pub hooks: EndpointHookCollection,
 }
 
 impl<C: Catalog, A: Authorizer + Clone, S: SecretStore, N: Authenticator + Debug> Debug
@@ -61,7 +62,6 @@ impl<C: Catalog, A: Authorizer + Clone, S: SecretStore, N: Authenticator + Debug
             .field("catalog_state", &"CatalogState")
             .field("secrets_state", &"SecretsState")
             .field("queues", &self.queues)
-            .field("publisher", &self.publisher)
             .field("table_change_checkers", &self.table_change_checkers)
             .field("authenticator", &self.authenticator)
             .field("svhp", &self.service_health_provider)
@@ -74,6 +74,7 @@ impl<C: Catalog, A: Authorizer + Clone, S: SecretStore, N: Authenticator + Debug
                 "endpoint_statistics_tracker_tx",
                 &self.endpoint_statistics_tracker_tx,
             )
+            .field("endpoint_hooks", &self.hooks)
             .finish()
     }
 }
@@ -94,12 +95,12 @@ pub fn new_full_router<
         catalog_state,
         secrets_state,
         queues,
-        publisher,
         table_change_checkers,
         service_health_provider,
         cors_origins,
         metrics_layer,
         endpoint_statistics_tracker_tx,
+        hooks,
     }: RouterArgs<C, A, S, N>,
 ) -> anyhow::Result<Router> {
     let v1_routes = new_v1_full_router::<crate::catalog::CatalogServer<C, A, S>, State<A, C, S>>();
@@ -158,15 +159,8 @@ pub fn new_full_router<
                 let health = service_health_provider.collect_health().await;
                 Json(health).into_response()
             }),
-        )
-        .merge(
-            utoipa_swagger_ui::SwaggerUi::new("/swagger-ui")
-                .url("/api-docs/management/v1/openapi.json", v1_api_doc::<A>())
-                .external_url_unchecked(
-                    "/api-docs/catalog/v1/openapi.json",
-                    ICEBERG_OPENAPI_SPEC_YAML.clone(),
-                ),
-        )
+        );
+    let router = maybe_merge_swagger_router(router)
         .layer(axum::middleware::from_fn(
             create_request_metadata_with_trace_and_project_fn,
         ))
@@ -193,9 +187,9 @@ pub fn new_full_router<
                 authz: authorizer,
                 catalog: catalog_state,
                 secrets: secrets_state,
-                publisher,
                 contract_verifiers: table_change_checkers,
                 queues,
+                hooks,
             },
         });
 
@@ -204,6 +198,23 @@ pub fn new_full_router<
     } else {
         router
     })
+}
+
+fn maybe_merge_swagger_router<C: Catalog, A: Authorizer + Clone, S: SecretStore>(
+    router: Router<ApiContext<State<A, C, S>>>,
+) -> Router<ApiContext<State<A, C, S>>> {
+    if CONFIG.serve_swagger_ui {
+        router.merge(
+            utoipa_swagger_ui::SwaggerUi::new("/swagger-ui")
+                .url("/api-docs/management/v1/openapi.json", v1_api_doc::<A>())
+                .external_url_unchecked(
+                    "/api-docs/catalog/v1/openapi.json",
+                    ICEBERG_OPENAPI_SPEC_YAML.clone(),
+                ),
+        )
+    } else {
+        router
+    }
 }
 
 /// Serve the given router on the given listener

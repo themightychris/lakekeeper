@@ -18,7 +18,7 @@ use iceberg_ext::{
 pub use s3::{S3Credential, S3Flavor, S3Location, S3Profile};
 use serde::{Deserialize, Serialize};
 
-use super::{secrets::SecretInStorage, NamespaceIdentUuid, TableIdentUuid};
+use super::{secrets::SecretInStorage, NamespaceId, TableId};
 use crate::{
     api::{
         iceberg::v1::DataAccess, management::v1::warehouse::TabularDeleteProfile, CatalogConfig,
@@ -26,8 +26,8 @@ use crate::{
     catalog::{compression_codec::CompressionCodec, io::list_location},
     request_metadata::RequestMetadata,
     retry::retry_fn,
-    service::tabular_idents::TabularIdentUuid,
-    WarehouseIdent,
+    service::tabular_idents::TabularId,
+    WarehouseId,
 };
 
 /// Storage profile for a warehouse.
@@ -85,7 +85,7 @@ impl StorageProfile {
     #[must_use]
     pub fn generate_catalog_config(
         &self,
-        warehouse_id: WarehouseIdent,
+        warehouse_id: WarehouseId,
         request_metadata: &RequestMetadata,
         delete_profile: TabularDeleteProfile,
     ) -> CatalogConfig {
@@ -197,7 +197,7 @@ impl StorageProfile {
     /// Fails if the `key_prefix` is not valid for S3 URLs.
     pub fn default_namespace_location(
         &self,
-        namespace_id: NamespaceIdentUuid,
+        namespace_id: NamespaceId,
     ) -> Result<Location, ValidationError> {
         let mut base_location: Location = self.base_location()?;
         base_location
@@ -221,12 +221,16 @@ impl StorageProfile {
     ///
     /// # Errors
     /// Fails if the underlying storage profile's generation fails.
+    #[allow(clippy::too_many_arguments)]
     pub async fn generate_table_config(
         &self,
         data_access: DataAccess,
         secret: Option<&StorageCredential>,
         table_location: &Location,
         storage_permissions: StoragePermissions,
+        request_metadata: &RequestMetadata,
+        warehouse_id: WarehouseId,
+        tabular_id: TabularId,
     ) -> Result<TableConfig, TableConfigError> {
         match self {
             StorageProfile::S3(profile) => {
@@ -236,6 +240,9 @@ impl StorageProfile {
                         secret.map(|s| s.try_to_s3()).transpose()?,
                         table_location,
                         storage_permissions,
+                        request_metadata,
+                        warehouse_id,
+                        tabular_id,
                     )
                     .await
             }
@@ -287,8 +294,8 @@ impl StorageProfile {
     ) -> Result<(), ValidationError> {
         // ------------- Common validations -------------
         // Test if we can generate a default namespace location
-        let ns_location = self.default_namespace_location(NamespaceIdentUuid::default())?;
-        self.default_tabular_location(&ns_location, TableIdentUuid::default().into());
+        let ns_location = self.default_namespace_location(NamespaceId::new_random())?;
+        self.default_tabular_location(&ns_location, TableId::new_random().into());
 
         // ------------- Profile specific validations -------------
         match self {
@@ -313,11 +320,12 @@ impl StorageProfile {
         &self,
         credential: Option<&StorageCredential>,
         location: Option<&Location>,
+        request_metadata: &RequestMetadata,
     ) -> Result<(), ValidationError> {
         let file_io = self.file_io(credential).await?;
 
-        let ns_id = NamespaceIdentUuid::default();
-        let table_id = TableIdentUuid::default();
+        let ns_id = NamespaceId::new_random();
+        let table_id = TableId::new_random();
         let ns_location = self.default_namespace_location(ns_id)?;
         let test_location = location.map_or_else(
             || self.default_tabular_location(&ns_location, table_id.into()),
@@ -338,8 +346,12 @@ impl StorageProfile {
         let direct_validation = self.validate_read_write(&file_io, &test_location, false);
         let vended_validation = async {
             if test_vended_credentials {
-                self.validate_vended_credentials_access(credential, &test_location)
-                    .await?;
+                self.validate_vended_credentials_access(
+                    credential,
+                    &test_location,
+                    request_metadata,
+                )
+                .await?;
             }
             Ok::<(), ValidationError>(())
         };
@@ -396,6 +408,7 @@ impl StorageProfile {
         &self,
         credential: Option<&StorageCredential>,
         test_location: &Location,
+        request_metadata: &RequestMetadata,
     ) -> Result<(), ValidationError> {
         tracing::debug!("Validating vended credentials access to: {test_location}");
 
@@ -408,6 +421,11 @@ impl StorageProfile {
                 credential,
                 test_location,
                 StoragePermissions::ReadWriteDelete,
+                // The following arguments are used only for generating the remote signing configuration
+                // and are not used in the vended credentials case.
+                request_metadata,
+                WarehouseId::new_random(),
+                TableId::new_random().into(),
             )
             .await?;
 
@@ -628,7 +646,7 @@ pub trait StorageLocations {
     fn default_tabular_location(
         &self,
         namespace_location: &Location,
-        table_id: TabularIdentUuid,
+        table_id: TabularId,
     ) -> Location {
         let mut l = namespace_location.clone();
         l.without_trailing_slash().push(&table_id.to_string());
@@ -898,10 +916,9 @@ mod tests {
 
         let target_location = "s3://my-bucket/subfolder/00000000-0000-0000-0000-000000000001/00000000-0000-0000-0000-000000000002";
 
-        let namespace_id: NamespaceIdentUuid =
-            uuid::uuid!("00000000-0000-0000-0000-000000000001").into();
+        let namespace_id: NamespaceId = uuid::uuid!("00000000-0000-0000-0000-000000000001").into();
         let namespace_location = profile.default_namespace_location(namespace_id).unwrap();
-        let table_id = TabularIdentUuid::View(uuid::uuid!("00000000-0000-0000-0000-000000000002"));
+        let table_id = TabularId::View(uuid::uuid!("00000000-0000-0000-0000-000000000002"));
         let table_location = profile.default_tabular_location(&namespace_location, table_id);
         assert_eq!(table_location.to_string(), target_location);
 
@@ -1147,7 +1164,7 @@ mod tests {
         let profile: StorageProfile = profile.into();
         let cred: StorageCredential = credential.into();
         profile
-            .validate_access(Some(&cred), None)
+            .validate_access(Some(&cred), None, &RequestMetadata::new_unauthenticated())
             .await
             .expect("Failed to validate access");
     }
@@ -1192,6 +1209,9 @@ mod tests {
                 Some(cred),
                 &table_location1,
                 StoragePermissions::ReadWriteDelete,
+                &RequestMetadata::new_unauthenticated(),
+                WarehouseId::new_random(),
+                TableId::new_random().into(),
             )
             .await
             .unwrap();
@@ -1205,6 +1225,9 @@ mod tests {
                 Some(cred),
                 &table_location2,
                 StoragePermissions::ReadWriteDelete,
+                &RequestMetadata::new_unauthenticated(),
+                WarehouseId::new_random(),
+                TableId::new_random().into(),
             )
             .await
             .unwrap();

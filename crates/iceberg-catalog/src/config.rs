@@ -22,7 +22,7 @@ use veil::Redact;
 
 use crate::{
     service::{event_publisher::kafka::KafkaConfig, task_queue::TaskQueueConfig},
-    ProjectId, WarehouseIdent,
+    ProjectId, WarehouseId,
 };
 
 const DEFAULT_RESERVED_NAMESPACES: [&str; 3] = ["system", "examples", "information_schema"];
@@ -97,8 +97,13 @@ pub struct DynAppConfig {
     /// Bind IP the server listens on.
     /// Defaults to 0.0.0.0
     pub bind_ip: IpAddr,
+    /// If x-forwarded-x headers should be respected.
+    /// Defaults to true
+    pub use_x_forwarded_headers: bool,
     /// If true (default), the NIL uuid is used as default project id.
     pub enable_default_project: bool,
+    /// If true, the swagger UI is served at /swagger-ui
+    pub serve_swagger_ui: bool,
     /// Template to obtain the "prefix" for a warehouse,
     /// may contain `{warehouse_id}` placeholder.
     ///
@@ -170,6 +175,7 @@ pub struct DynAppConfig {
 
     // ------------- KAFKA CLOUDEVENTS -------------
     pub kafka_topic: Option<String>,
+    #[cfg(feature = "kafka")]
     pub kafka_config: Option<KafkaConfig>,
 
     // ------------- TRACING CLOUDEVENTS ----------
@@ -441,6 +447,7 @@ impl Default for DynAppConfig {
             base_uri: None,
             metrics_port: 9000,
             enable_default_project: true,
+            use_x_forwarded_headers: true,
             prefix_template: "{warehouse_id}".to_string(),
             allow_origin: None,
             reserved_namespaces: ReservedNamespaces(HashSet::from([
@@ -474,6 +481,7 @@ impl Default for DynAppConfig {
             nats_user: None,
             nats_password: None,
             nats_token: None,
+            #[cfg(feature = "kafka")]
             kafka_config: None,
             kafka_topic: None,
             log_cloudevents: None,
@@ -497,12 +505,13 @@ impl Default for DynAppConfig {
             default_tabular_expiration_delay_seconds: chrono::Duration::days(7),
             endpoint_stat_flush_interval: Duration::from_secs(30),
             server_id: uuid::Uuid::nil(),
+            serve_swagger_ui: true,
         }
     }
 }
 
 impl DynAppConfig {
-    pub fn warehouse_prefix(&self, warehouse_id: WarehouseIdent) -> String {
+    pub fn warehouse_prefix(&self, warehouse_id: WarehouseId) -> String {
         self.prefix_template
             .replace("{warehouse_id}", warehouse_id.to_string().as_str())
     }
@@ -735,7 +744,7 @@ where
 
 #[cfg(test)]
 mod test {
-    use std::net::Ipv6Addr;
+    use std::{collections::HashMap, io::Write as _, net::Ipv6Addr};
 
     #[allow(unused_imports)]
     use super::*;
@@ -907,6 +916,7 @@ mod test {
     fn test_openfga_config_no_auth() {
         figment::Jail::expect_with(|jail| {
             jail.set_env("LAKEKEEPER_TEST__AUTHZ_BACKEND", "openfga");
+            jail.set_env("LAKEKEEPER_TEST__OPENFGA__ENDPOINT", "http://localhost");
             jail.set_env("LAKEKEEPER_TEST__OPENFGA__STORE_NAME", "store_name");
             let config = get_config();
             let authz_config = config.openfga.unwrap();
@@ -923,6 +933,7 @@ mod test {
     fn test_openfga_config_api_key() {
         figment::Jail::expect_with(|jail| {
             jail.set_env("LAKEKEEPER_TEST__AUTHZ_BACKEND", "openfga");
+            jail.set_env("LAKEKEEPER_TEST__OPENFGA__ENDPOINT", "http://localhost");
             jail.set_env("LAKEKEEPER_TEST__OPENFGA__API_KEY", "api_key");
             let config = get_config();
             let authz_config = config.openfga.unwrap();
@@ -942,6 +953,7 @@ mod test {
     fn test_openfga_client_config_fails_without_token() {
         figment::Jail::expect_with(|jail| {
             jail.set_env("LAKEKEEPER_TEST__AUTHZ_BACKEND", "openfga");
+            jail.set_env("LAKEKEEPER_TEST__OPENFGA__ENDPOINT", "http://localhost");
             jail.set_env("LAKEKEEPER_TEST__OPENFGA__CLIENT_ID", "client_id");
             jail.set_env("LAKEKEEPER_TEST__OPENFGA__STORE_NAME", "store_name");
             get_config();
@@ -953,6 +965,7 @@ mod test {
     fn test_openfga_client_credentials() {
         figment::Jail::expect_with(|jail| {
             jail.set_env("LAKEKEEPER_TEST__AUTHZ_BACKEND", "openfga");
+            jail.set_env("LAKEKEEPER_TEST__OPENFGA__ENDPOINT", "http://localhost");
             jail.set_env("LAKEKEEPER_TEST__OPENFGA__CLIENT_ID", "client_id");
             jail.set_env("LAKEKEEPER_TEST__OPENFGA__CLIENT_SECRET", "client_secret");
             jail.set_env(
@@ -981,6 +994,7 @@ mod test {
     fn test_openfga_client_credentials_with_scope() {
         figment::Jail::expect_with(|jail| {
             jail.set_env("LAKEKEEPER_TEST__AUTHZ_BACKEND", "openfga");
+            jail.set_env("LAKEKEEPER_TEST__OPENFGA__ENDPOINT", "http://localhost");
             jail.set_env("LAKEKEEPER_TEST__OPENFGA__CLIENT_ID", "client_id");
             jail.set_env("LAKEKEEPER_TEST__OPENFGA__CLIENT_SECRET", "client_secret");
             jail.set_env("LAKEKEEPER_TEST__OPENFGA__SCOPE", "openfga");
@@ -1070,6 +1084,94 @@ mod test {
             let config = get_config();
             assert!(config.enable_aws_system_credentials);
             assert!(!config.s3_enable_direct_system_credentials);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn test_use_x_forwarded_headers() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("LAKEKEEPER_TEST__USE_X_FORWARDED_HEADERS", "true");
+            let config = get_config();
+            assert!(config.use_x_forwarded_headers);
+            Ok(())
+        });
+
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("LAKEKEEPER_TEST__USE_X_FORWARDED_HEADERS", "false");
+            let config = get_config();
+            assert!(!config.use_x_forwarded_headers);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn test_kafka_config_env_var() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("LAKEKEEPER_TEST__KAFKA_TOPIC", "test_topic");
+            jail.set_env(
+                "LAKEKEEPER_TEST__KAFKA_CONFIG",
+                r#"{"sasl.password"="my_pw","bootstrap.servers"="host1:port,host2:port","security.protocol"="SSL"}"#,
+            );
+            jail.set_env(
+                "LAKEKEEPER_TEST__KAFKA_CONFIG_FILE",
+                r#"{"sasl.password"="my_pw","bootstrap.servers"="host1:port,host2:port","security.protocol"="SSL"}"#,
+            );
+            let config = get_config();
+            assert_eq!(config.kafka_topic, Some("test_topic".to_string()));
+            assert_eq!(
+                config.kafka_config,
+                Some(KafkaConfig {
+                    sasl_password: Some("my_pw".to_string()),
+                    sasl_oauthbearer_client_secret: None,
+                    ssl_key_password: None,
+                    ssl_keystore_password: None,
+                    conf: HashMap::from_iter([
+                        (
+                            "bootstrap.servers".to_string(),
+                            "host1:port,host2:port".to_string()
+                        ),
+                        ("security.protocol".to_string(), "SSL".to_string()),
+                    ]),
+                })
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn test_kafka_config_file() {
+        let named_tmp_file = tempfile::NamedTempFile::new().unwrap();
+        named_tmp_file
+            .as_file()
+            .write_all(
+                r#"{"sasl.password"="my_pw","bootstrap.servers"="host1:port,host2:port","security.protocol"="SSL"}"#.as_bytes(),
+            )
+            .unwrap();
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("LAKEKEEPER_TEST__KAFKA_TOPIC", "test_topic");
+            jail.set_env(
+                "LAKEKEEPER_TEST__KAFKA_CONFIG_FILE",
+                named_tmp_file.path().to_str().unwrap(),
+            );
+            let config = get_config();
+            assert_eq!(config.kafka_topic, Some("test_topic".to_string()));
+            assert_eq!(
+                config.kafka_config,
+                Some(KafkaConfig {
+                    sasl_password: Some("my_pw".to_string()),
+                    sasl_oauthbearer_client_secret: None,
+                    ssl_key_password: None,
+                    ssl_keystore_password: None,
+                    conf: HashMap::from_iter([
+                        (
+                            "bootstrap.servers".to_string(),
+                            "host1:port,host2:port".to_string()
+                        ),
+                        ("security.protocol".to_string(), "SSL".to_string()),
+                    ]),
+                })
+            );
             Ok(())
         });
     }
