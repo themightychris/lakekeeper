@@ -331,6 +331,27 @@ impl Authorizer for OpenFGAAuthorizer {
         .map_err(Into::into)
     }
 
+    async fn are_allowed_namespace_actions<A>(
+        &self,
+        metadata: &RequestMetadata,
+        namespace_ids: Vec<NamespaceId>,
+        actions: Vec<A>,
+    ) -> Result<Vec<bool>>
+    where
+        A: From<CatalogNamespaceAction> + std::fmt::Display + Send,
+    {
+        let items: Vec<_> = namespace_ids
+            .into_iter()
+            .zip(actions.into_iter())
+            .map(|(id, a)| CheckRequestTupleKey {
+                user: metadata.actor().to_openfga(),
+                relation: a.to_string(),
+                object: id.to_openfga(),
+            })
+            .collect();
+        self.batch_check(items).await.map_err(Into::into)
+    }
+
     async fn is_allowed_table_action<A>(
         &self,
         metadata: &RequestMetadata,

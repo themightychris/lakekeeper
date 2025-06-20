@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use axum::Router;
+use futures::future::try_join_all;
 use strum::EnumIter;
 use strum_macros::EnumString;
 
@@ -243,6 +244,24 @@ where
     ) -> Result<bool>
     where
         A: From<CatalogNamespaceAction> + std::fmt::Display + Send;
+
+    async fn are_allowed_namespace_actions<A>(
+        &self,
+        metadata: &RequestMetadata,
+        namespace_ids: Vec<NamespaceId>,
+        actions: Vec<A>,
+    ) -> Result<Vec<bool>>
+    where
+        A: From<CatalogNamespaceAction> + std::fmt::Display + Send,
+    {
+        try_join_all(
+            namespace_ids
+                .into_iter()
+                .zip(actions.into_iter())
+                .map(|(id, a)| self.is_allowed_namespace_action(metadata, id, a)),
+        )
+        .await
+    }
 
     /// Return Ok(true) if the action is allowed, otherwise return Ok(false).
     /// Return Err for internal errors.
